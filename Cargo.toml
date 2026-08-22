@@ -1,0 +1,10 @@
+[package]
+name = "robust-sinkhorn-queue"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rusqlite = { version = "0.31", features = ["bundled"] }
+ndarray = "0.15"
+thiserror = "1"
+rand = "0.8"
