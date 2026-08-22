@@ -7,9 +7,7 @@ use tokio::time::{interval, MissedTickBehavior};
 
 use crate::sync_queue::QueueResult;
 use crate::tokio_queue::AsyncRobustSinkhornQueue;
-use crate::value::{
-    ClaimedTask, Epsilon, LeaseDuration, TaskId, WorkerDescriptor, WorkerId,
-};
+use crate::value::{ClaimedTask, Epsilon, LeaseDuration, TaskId, WorkerDescriptor, WorkerId};
 
 pub async fn run_with_heartbeat<Fut>(
     queue: AsyncRobustSinkhornQueue,
@@ -144,9 +142,7 @@ where
             let rx = shutdown.clone();
             let h = handler.clone();
 
-            tokio::spawn(async move {
-                run_worker_loop(q, w, rx, poll_interval, lease, h).await
-            })
+            tokio::spawn(async move { run_worker_loop(q, w, rx, poll_interval, lease, h).await })
         })
         .collect()
 }

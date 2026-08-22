@@ -354,8 +354,7 @@ impl ClaimedTask {
             task_kind: TaskKind::from_db(&value.task_type),
             payload: TaskPayload::new(value.payload),
             retry_count: RetryCount::new(value.retry_count),
-            max_retries: MaxRetries::new(value.max_retries)
-                .unwrap_or_else(|_| MaxRetries(0)),
+            max_retries: MaxRetries::new(value.max_retries).unwrap_or(MaxRetries(0)),
         }
     }
 }

@@ -341,14 +341,14 @@ impl RobustSinkhornQueue {
                 let age_bonus = age.min(300.0) * 0.15;
 
                 for (j, worker) in active_workers.iter().enumerate() {
-                    let affinity_cost =
-                        match (task.task_type.as_str(), worker.worker_type.as_str()) {
-                            ("gpu", "gpu") => 0.0,
-                            ("gpu", _) => 20.0,
-                            ("cpu", "cpu") => 0.0,
-                            ("cpu", _) => 6.0,
-                            _ => 2.0,
-                        };
+                    let affinity_cost = match (task.task_type.as_str(), worker.worker_type.as_str())
+                    {
+                        ("gpu", "gpu") => 0.0,
+                        ("gpu", _) => 20.0,
+                        ("cpu", "cpu") => 0.0,
+                        ("cpu", _) => 6.0,
+                        _ => 2.0,
+                    };
 
                     let prio_bonus = task.priority as f64 * 1.8;
                     let base_cost = 30.0 - prio_bonus - age_bonus + affinity_cost;
@@ -645,7 +645,11 @@ fn sinkhorn_knopp_log_domain(
     let mut v = vec![0.0f64; m];
 
     let max_iter = max_iter.max(1);
-    let tol = if tol.is_finite() && tol > 0.0 { tol } else { 1e-6 };
+    let tol = if tol.is_finite() && tol > 0.0 {
+        tol
+    } else {
+        1e-6
+    };
 
     for _ in 0..max_iter {
         let old_u = u.clone();
@@ -730,9 +734,7 @@ fn sinkhorn_knopp_log_domain(
         for j in 0..m {
             let log_p = (u[i] + v[j] - cost[[i, j]]) / eps;
 
-            let value = if !log_p.is_finite() {
-                0.0
-            } else if log_p < -700.0 {
+            let value = if !log_p.is_finite() || log_p < -700.0 {
                 0.0
             } else if log_p > 700.0 {
                 1e300
@@ -819,7 +821,7 @@ fn round_transport_plan_bounded(plan: &Array2<f64>, capacities: &[i64]) -> Vec<i
                 0.0
             };
 
-            if best.map_or(true, |(best_score, _)| score > best_score) {
+            if best.is_none_or(|(best_score, _)| score > best_score) {
                 best = Some((score, j));
             }
         }

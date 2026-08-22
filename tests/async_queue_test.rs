@@ -2,9 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use robust_sinkhorn_queue::runtime::{
-    run_dispatcher_loop, run_with_heartbeat, spawn_worker_slots,
-};
+use robust_sinkhorn_queue::runtime::{run_dispatcher_loop, run_with_heartbeat, spawn_worker_slots};
 use robust_sinkhorn_queue::tokio_queue::AsyncRobustSinkhornQueue;
 use robust_sinkhorn_queue::value::*;
 
@@ -29,7 +27,10 @@ async fn test_value_types_validation() {
     assert_eq!(TaskStatus::parse("PENDING").unwrap(), TaskStatus::Pending);
     assert_eq!(TaskStatus::parse("ASSIGNED").unwrap(), TaskStatus::Assigned);
     assert_eq!(TaskStatus::parse("RUNNING").unwrap(), TaskStatus::Running);
-    assert_eq!(TaskStatus::parse("COMPLETED").unwrap(), TaskStatus::Completed);
+    assert_eq!(
+        TaskStatus::parse("COMPLETED").unwrap(),
+        TaskStatus::Completed
+    );
     assert_eq!(TaskStatus::parse("FAILED").unwrap(), TaskStatus::Failed);
     assert!(TaskStatus::parse("UNKNOWN").is_err());
     assert_eq!(TaskStatus::Pending.as_str(), "PENDING");
@@ -361,19 +362,15 @@ async fn test_run_with_heartbeat_cancellation_and_failure() {
         tokio::time::sleep(Duration::from_millis(20)).await;
         Ok(())
     };
-    let res = run_with_heartbeat(
-        queue.clone(),
-        task_id,
-        worker_id.clone(),
-        lease,
-        task_fut,
-    )
-    .await;
+    let res = run_with_heartbeat(queue.clone(), task_id, worker_id.clone(), lease, task_fut).await;
 
     assert!(res.is_ok());
 
     // Test heartbeat failure when task is marked COMPLETED (no longer RUNNING in DB)
-    queue.complete_task(task_id, worker_id.clone()).await.unwrap();
+    queue
+        .complete_task(task_id, worker_id.clone())
+        .await
+        .unwrap();
 
     let slow_task_fut = async {
         tokio::time::sleep(Duration::from_millis(200)).await;
