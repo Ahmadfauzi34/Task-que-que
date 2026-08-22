@@ -4,8 +4,8 @@ use std::time::Duration;
 use robust_sinkhorn_queue::runtime::{run_dispatcher_loop, spawn_worker_slots};
 use robust_sinkhorn_queue::tokio_queue::AsyncRobustSinkhornQueue;
 use robust_sinkhorn_queue::value::{
-    ClaimedTask, EnqueueCommand, Epsilon, LeaseDuration, MaxRetries, Priority, SlotCount,
-    TaskKind, TaskName, TaskPayload, WorkerDescriptor, WorkerId, WorkerKind,
+    ClaimedTask, EnqueueCommand, Epsilon, LeaseDuration, MaxRetries, Priority, SlotCount, TaskKind,
+    TaskName, TaskPayload, WorkerDescriptor, WorkerId, WorkerKind,
 };
 use robust_sinkhorn_queue::QueueResult;
 
