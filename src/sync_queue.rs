@@ -1,13 +1,15 @@
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ndarray::{Array1, Array2};
 use rand::Rng;
 use rusqlite::{params, Connection, ErrorCode, OptionalExtension, TransactionBehavior};
 use thiserror::Error;
 use tracing::{debug, info, info_span, instrument, warn};
+
+use crate::metrics;
 
 #[derive(Error, Debug)]
 pub enum QueueError {
@@ -201,14 +203,15 @@ impl RobustSinkhornQueue {
         max_retries: i64,
         trace_id: &str,
     ) -> QueueResult<i64> {
+        let start = Instant::now();
         let now = now_f64();
 
         let task_name = task_name.to_owned();
-        let task_type = task_type.to_owned();
+        let task_type_owned = task_type.to_owned();
         let payload = payload.to_owned();
         let trace_id = trace_id.to_owned();
 
-        DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
+        let result = DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
             let _span = info_span!("queue.db.insert").entered();
 
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -232,7 +235,7 @@ impl RobustSinkhornQueue {
                     (?1, ?2, ?3, ?4, ?5, 'PENDING', 0, ?6, ?7, ?8, ?9)",
                 params![
                     task_name,
-                    task_type,
+                    task_type_owned,
                     payload,
                     priority,
                     max_retries,
@@ -248,14 +251,22 @@ impl RobustSinkhornQueue {
 
             info!(task.id = id, "task enqueued");
             Ok(id)
-        })
+        });
+
+        if result.is_ok() {
+            metrics::record_enqueue(task_type);
+            metrics::record_db_operation("enqueue", start.elapsed());
+        }
+
+        result
     }
 
     #[instrument(name = "queue.recover_expired_leases", skip(self))]
     pub fn recover_expired_leases(&self) -> QueueResult<usize> {
+        let start = Instant::now();
         let now = now_f64();
 
-        DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
+        let result = DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
             let _span = info_span!("queue.db.recover").entered();
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
@@ -276,7 +287,18 @@ impl RobustSinkhornQueue {
                 info!(recovered.count = affected, "recovered expired leases");
             }
             Ok(affected)
-        })
+        });
+
+        if let Ok(count) = result {
+            if count > 0 {
+                for _ in 0..count {
+                    metrics::record_lease_expiration();
+                }
+            }
+            metrics::record_db_operation("recover_leases", start.elapsed());
+        }
+
+        result
     }
 
     pub fn dispatch_batch_defaults(
@@ -301,6 +323,8 @@ impl RobustSinkhornQueue {
         epsilon: f64,
         lease_sec: f64,
     ) -> QueueResult<Vec<DispatchedTask>> {
+        let dispatch_start = Instant::now();
+
         let active_workers: Vec<WorkerDescriptor> = workers
             .iter()
             .filter(|w| w.available_slots > 0)
@@ -332,7 +356,7 @@ impl RobustSinkhornQueue {
             10.0
         };
 
-        DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
+        let result = DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
             let _span = info_span!("queue.db.dispatch").entered();
             let now = now_f64();
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -369,6 +393,7 @@ impl RobustSinkhornQueue {
                 return Ok(Vec::new());
             }
 
+            let sinkhorn_start = Instant::now();
             let n = rows.len();
             let m = active_workers.len();
 
@@ -428,6 +453,7 @@ impl RobustSinkhornQueue {
 
             let plan =
                 sinkhorn_knopp_log_domain(&cost, &row_supply, &col_demand, epsilon, 120, 1e-6);
+            metrics::record_sinkhorn_computation(sinkhorn_start.elapsed());
 
             let capacities: Vec<i64> = active_workers.iter().map(|w| w.available_slots).collect();
             let assignments = round_transport_plan_bounded(&plan, &capacities);
@@ -493,6 +519,8 @@ impl RobustSinkhornQueue {
                         "task assigned to worker"
                     );
 
+                    metrics::record_dispatch(&task.task_type, &worker.worker_type);
+
                     dispatched.push(DispatchedTask {
                         task_id: task.id,
                         task_name: task.name.clone(),
@@ -511,14 +539,23 @@ impl RobustSinkhornQueue {
                 "dispatch batch completed"
             );
             Ok(dispatched)
-        })
+        });
+
+        metrics::record_dispatch_latency(dispatch_start.elapsed());
+
+        if result.is_ok() {
+            metrics::record_db_operation("dispatch_batch", dispatch_start.elapsed());
+        }
+
+        result
     }
 
     #[instrument(name = "queue.claim_task", skip(self), fields(worker.id = %worker_id))]
     pub fn claim_task(&self, worker_id: &str) -> QueueResult<Option<ClaimedTask>> {
+        let start = Instant::now();
         let worker_id = worker_id.to_owned();
 
-        DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
+        let result = DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
             let _span = info_span!("queue.db.claim").entered();
             let now = now_f64();
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -562,7 +599,13 @@ impl RobustSinkhornQueue {
             }
 
             Ok(None)
-        })
+        });
+
+        if result.is_ok() {
+            metrics::record_db_operation("claim_task", start.elapsed());
+        }
+
+        result
     }
 
     #[instrument(name = "queue.heartbeat", skip(self), fields(
@@ -571,6 +614,7 @@ impl RobustSinkhornQueue {
         lease.extend_sec = extend_sec
     ))]
     pub fn heartbeat(&self, task_id: i64, worker_id: &str, extend_sec: f64) -> QueueResult<bool> {
+        let start = Instant::now();
         let worker_id = worker_id.to_owned();
 
         let extend_sec = if extend_sec.is_finite() && extend_sec > 0.0 {
@@ -579,7 +623,7 @@ impl RobustSinkhornQueue {
             10.0
         };
 
-        DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
+        let result = DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
             let _span = info_span!("queue.db.heartbeat").entered();
             let now = now_f64();
             let lease_until = now + extend_sec;
@@ -599,14 +643,26 @@ impl RobustSinkhornQueue {
 
             tx.commit()?;
             Ok(affected > 0)
-        })
+        });
+
+        if let Ok(success) = result {
+            if success {
+                metrics::record_heartbeat();
+            } else {
+                metrics::record_heartbeat_failure();
+            }
+            metrics::record_db_operation("heartbeat", start.elapsed());
+        }
+
+        result
     }
 
     #[instrument(name = "queue.complete_task", skip(self), fields(task.id = task_id, worker.id = %worker_id))]
     pub fn complete_task(&self, task_id: i64, worker_id: &str) -> QueueResult<()> {
+        let start = Instant::now();
         let worker_id = worker_id.to_owned();
 
-        DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
+        let result = DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
             let _span = info_span!("queue.db.complete").entered();
             let now = now_f64();
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -626,7 +682,13 @@ impl RobustSinkhornQueue {
             tx.commit()?;
             info!(task.id = task_id, "task completed");
             Ok(())
-        })
+        });
+
+        if result.is_ok() {
+            metrics::record_db_operation("complete_task", start.elapsed());
+        }
+
+        result
     }
 
     #[instrument(name = "queue.fail_task", skip(self, error_msg), fields(
@@ -644,10 +706,11 @@ impl RobustSinkhornQueue {
         retry_count: i64,
         max_retries: i64,
     ) -> QueueResult<()> {
+        let start = Instant::now();
         let worker_id = worker_id.to_owned();
         let error_msg = error_msg.to_owned();
 
-        DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
+        let result = DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
             let _span = info_span!("queue.db.fail").entered();
             let now = now_f64();
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -698,7 +761,13 @@ impl RobustSinkhornQueue {
 
             tx.commit()?;
             Ok(())
-        })
+        });
+
+        if result.is_ok() {
+            metrics::record_db_operation("fail_task", start.elapsed());
+        }
+
+        result
     }
 }
 

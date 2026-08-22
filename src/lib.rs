@@ -1,3 +1,4 @@
+pub mod metrics;
 pub mod observability;
 pub mod runtime;
 pub mod sync_queue;

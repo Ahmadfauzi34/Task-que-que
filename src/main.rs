@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use robust_sinkhorn_queue::metrics::{start_metrics_server, MetricsConfig};
 use robust_sinkhorn_queue::observability::{ExporterKind, ObservabilityConfig};
 use robust_sinkhorn_queue::runtime::{run_dispatcher_loop, spawn_worker_slots};
 use robust_sinkhorn_queue::tokio_queue::AsyncRobustSinkhornQueue;
@@ -13,13 +14,15 @@ use tracing::Instrument;
 
 #[tokio::main]
 async fn main() -> QueueResult<()> {
-    let config = ObservabilityConfig {
+    let obs_config = ObservabilityConfig {
         service_name: "sinkhorn-queue-example".into(),
         log_exporter: ExporterKind::Console,
         otlp_endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
         ..Default::default()
     };
-    let _guard = robust_sinkhorn_queue::observability::init(config);
+    let _obs_guard = robust_sinkhorn_queue::observability::init(obs_config);
+
+    let _metrics_handle = robust_sinkhorn_queue::metrics::init_metrics();
 
     let queue = AsyncRobustSinkhornQueue::new("queue.db");
     queue.ensure_schema().await?;
@@ -49,6 +52,11 @@ async fn main() -> QueueResult<()> {
         .await?;
 
     tracing::info!(trace.id = %trace_id.as_str(), "task enqueued with trace");
+
+    let metrics_config = MetricsConfig {
+        listen_addr: ([0, 0, 0, 0], 9090).into(),
+    };
+    let metrics_server = tokio::spawn(start_metrics_server(metrics_config, shutdown_rx.clone()));
 
     let dispatcher_workers = vec![worker.clone()];
 
@@ -102,6 +110,7 @@ async fn main() -> QueueResult<()> {
     println!("shutdown dimulai...");
     let _ = shutdown_tx.send(true);
 
+    let _ = metrics_server.await;
     dispatcher.await.unwrap()?;
 
     for handle in worker_handles {

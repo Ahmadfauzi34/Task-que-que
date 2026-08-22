@@ -1,11 +1,12 @@
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 use tokio::time::{interval, MissedTickBehavior};
 use tracing::{debug, info, info_span, warn, Instrument};
 
+use crate::metrics;
 use crate::sync_queue::{QueueError, QueueResult};
 use crate::tokio_queue::AsyncRobustSinkhornQueue;
 use crate::value::{ClaimedTask, Epsilon, LeaseDuration, TaskId, WorkerDescriptor, WorkerId};
@@ -53,10 +54,12 @@ where
                             debug!("heartbeat succeeded");
                         }
                         Ok(false) => {
+                            metrics::record_heartbeat_failure();
                             warn!("lease lost during heartbeat");
                             return Err("lease hilang atau task tidak lagi RUNNING".into());
                         }
                         Err(e) => {
+                            metrics::record_heartbeat_failure();
                             warn!(error = %e, "heartbeat failed");
                             return Err(format!("heartbeat error: {e}"));
                         }
@@ -120,6 +123,7 @@ where
                         let retry_count = task.retry_count;
                         let max_retries = task.max_retries;
                         let trace_id = task.trace_id.clone();
+                        let task_type = task.task_kind.to_db();
 
                         info!(
                             task.id = task_id.value(),
@@ -129,6 +133,7 @@ where
                             "task claimed, starting execution"
                         );
 
+                        let execution_start = Instant::now();
                         let fut = (*handler)(task);
 
                         let result = run_with_heartbeat(
@@ -140,14 +145,24 @@ where
                         )
                         .await;
 
+                        let execution_duration = execution_start.elapsed();
+                        metrics::record_task_execution_duration(&task_type, execution_duration);
+
                         match result {
                             Ok(()) => {
+                                metrics::record_complete(&task_type);
                                 info!(task.id = task_id.value(), "task completed successfully");
                                 queue
                                     .complete_task(task_id, worker.worker_id.clone())
                                     .await?;
                             }
                             Err(err) => {
+                                metrics::record_failure(&task_type, "execution_error");
+
+                                if retry_count.value() + 1 < max_retries.value() {
+                                    metrics::record_retry(&task_type, retry_count.value());
+                                }
+
                                 warn!(
                                     task.id = task_id.value(),
                                     error = %err,
