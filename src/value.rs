@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::lease_fence::FencedClaimedTask;
 use crate::sync_queue::{QueueError, QueueResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -108,6 +109,39 @@ impl RetryCount {
 
     pub fn value(self) -> i64 {
         self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LeaseGeneration(i64);
+
+impl LeaseGeneration {
+    pub fn new(value: i64) -> Self {
+        Self(value)
+    }
+
+    pub fn value(self) -> i64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseMutation {
+    Applied,
+    Stale,
+}
+
+impl LeaseMutation {
+    pub fn is_applied(self) -> bool {
+        matches!(self, Self::Applied)
+    }
+
+    pub(crate) fn from_affected_rows(affected: usize) -> Self {
+        if affected == 1 {
+            Self::Applied
+        } else {
+            Self::Stale
+        }
     }
 }
 
@@ -344,10 +378,11 @@ pub struct ClaimedTask {
     pub payload: TaskPayload,
     pub retry_count: RetryCount,
     pub max_retries: MaxRetries,
+    pub lease_generation: LeaseGeneration,
 }
 
 impl ClaimedTask {
-    pub fn from_sync(value: crate::sync_queue::ClaimedTask) -> Self {
+    pub fn from_fenced(value: FencedClaimedTask) -> Self {
         Self {
             id: TaskId::new(value.id),
             task_name: TaskName::new(value.task_name),
@@ -355,6 +390,7 @@ impl ClaimedTask {
             payload: TaskPayload::new(value.payload),
             retry_count: RetryCount::new(value.retry_count),
             max_retries: MaxRetries::new(value.max_retries).unwrap_or(MaxRetries(0)),
+            lease_generation: value.lease_generation,
         }
     }
 }

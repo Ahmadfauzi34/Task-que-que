@@ -1,27 +1,35 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::lease_fence::LeaseFence;
 use crate::sync_queue::{self, RobustSinkhornQueue};
 use crate::value::{
-    ClaimedTask, DispatchedTask, EnqueueCommand, Epsilon, LeaseDuration, MaxRetries, RetryCount,
-    TaskId, WorkerDescriptor, WorkerId,
+    ClaimedTask, DispatchedTask, EnqueueCommand, Epsilon, LeaseDuration, LeaseGeneration,
+    LeaseMutation, TaskId, WorkerDescriptor, WorkerId,
 };
 
 #[derive(Clone)]
 pub struct AsyncRobustSinkhornQueue {
     inner: Arc<RobustSinkhornQueue>,
+    lease_fence: Arc<LeaseFence>,
 }
 
 impl AsyncRobustSinkhornQueue {
     pub fn new(db_path: impl Into<PathBuf>) -> Self {
+        let db_path = db_path.into();
+
         Self {
-            inner: Arc::new(RobustSinkhornQueue::new(db_path)),
+            inner: Arc::new(RobustSinkhornQueue::new(db_path.clone())),
+            lease_fence: Arc::new(LeaseFence::new(db_path)),
         }
     }
 
-    pub fn from_sync(queue: RobustSinkhornQueue) -> Self {
+    pub fn from_sync(queue: RobustSinkhornQueue, db_path: impl Into<PathBuf>) -> Self {
+        let db_path = db_path.into();
+
         Self {
             inner: Arc::new(queue),
+            lease_fence: Arc::new(LeaseFence::new(db_path)),
         }
     }
 
@@ -39,8 +47,23 @@ impl AsyncRobustSinkhornQueue {
             })?
     }
 
+    async fn blocking_fence<F, T>(&self, op: F) -> sync_queue::QueueResult<T>
+    where
+        F: FnOnce(Arc<LeaseFence>) -> sync_queue::QueueResult<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let lease_fence = self.lease_fence.clone();
+
+        tokio::task::spawn_blocking(move || op(lease_fence))
+            .await
+            .map_err(|e| {
+                sync_queue::QueueError::InvalidState(format!("spawn_blocking join error: {e}"))
+            })?
+    }
+
     pub async fn ensure_schema(&self) -> sync_queue::QueueResult<()> {
-        self.blocking(|q| q.ensure_schema()).await
+        self.blocking(|q| q.ensure_schema()).await?;
+        self.blocking_fence(|fence| fence.ensure_schema()).await
     }
 
     pub async fn enqueue(&self, cmd: EnqueueCommand) -> sync_queue::QueueResult<TaskId> {
@@ -86,32 +109,38 @@ impl AsyncRobustSinkhornQueue {
     ) -> sync_queue::QueueResult<Option<ClaimedTask>> {
         let worker = worker_id.into_string();
 
-        let raw = self.blocking(move |q| q.claim_task(&worker)).await?;
+        let raw = self
+            .blocking_fence(move |fence| fence.claim_task(&worker))
+            .await?;
 
-        Ok(raw.map(ClaimedTask::from_sync))
+        Ok(raw.map(ClaimedTask::from_fenced))
     }
 
     pub async fn heartbeat(
         &self,
         task_id: TaskId,
         worker_id: WorkerId,
+        generation: LeaseGeneration,
         lease: LeaseDuration,
-    ) -> sync_queue::QueueResult<bool> {
+    ) -> sync_queue::QueueResult<LeaseMutation> {
         let worker = worker_id.into_string();
         let lease_sec = lease.as_secs_f64();
 
-        self.blocking(move |q| q.heartbeat(task_id.value(), &worker, lease_sec))
-            .await
+        self.blocking_fence(move |fence| {
+            fence.heartbeat(task_id.value(), &worker, generation, lease_sec)
+        })
+        .await
     }
 
     pub async fn complete_task(
         &self,
         task_id: TaskId,
         worker_id: WorkerId,
-    ) -> sync_queue::QueueResult<()> {
+        generation: LeaseGeneration,
+    ) -> sync_queue::QueueResult<LeaseMutation> {
         let worker = worker_id.into_string();
 
-        self.blocking(move |q| q.complete_task(task_id.value(), &worker))
+        self.blocking_fence(move |fence| fence.complete_task(task_id.value(), &worker, generation))
             .await
     }
 
@@ -119,21 +148,14 @@ impl AsyncRobustSinkhornQueue {
         &self,
         task_id: TaskId,
         worker_id: WorkerId,
+        generation: LeaseGeneration,
         error_msg: &str,
-        retry_count: RetryCount,
-        max_retries: MaxRetries,
-    ) -> sync_queue::QueueResult<()> {
+    ) -> sync_queue::QueueResult<LeaseMutation> {
         let worker = worker_id.into_string();
         let error = error_msg.to_owned();
 
-        self.blocking(move |q| {
-            q.fail_task(
-                task_id.value(),
-                &worker,
-                &error,
-                retry_count.value(),
-                max_retries.value(),
-            )
+        self.blocking_fence(move |fence| {
+            fence.fail_task(task_id.value(), &worker, generation, &error)
         })
         .await
     }

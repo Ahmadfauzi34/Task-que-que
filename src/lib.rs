@@ -1,3 +1,4 @@
+pub mod lease_fence;
 pub mod runtime;
 pub mod sync_queue;
 pub mod tokio_queue;
