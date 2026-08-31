@@ -97,6 +97,13 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, HttpError> {
     let mut buffer = Vec::with_capacity(4096);
     let header_end = loop {
         if let Some(position) = find_header_end(&buffer) {
+            if position > MAX_HEADER_BYTES {
+                return Err(HttpError::new(
+                    431,
+                    "Request Header Fields Too Large",
+                    "request headers exceed local API limit",
+                ));
+            }
             break position;
         }
 
@@ -128,7 +135,6 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, HttpError> {
     let header_bytes = &buffer[..header_end];
     let header_text = std::str::from_utf8(header_bytes)
         .map_err(|_| HttpError::new(400, "Bad Request", "request headers must be UTF-8"))?;
-
     let (method, path, headers) = parse_head(header_text)?;
 
     if headers.contains_key("transfer-encoding") {
@@ -160,10 +166,7 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, HttpError> {
     } else {
         Vec::new()
     };
-
-    if body.len() > content_length {
-        body.truncate(content_length);
-    }
+    body.truncate(content_length);
 
     while body.len() < content_length {
         let remaining = content_length - body.len();
@@ -210,13 +213,8 @@ fn parse_head(header_text: &str) -> Result<(String, String, HashMap<String, Stri
         .ok_or_else(|| HttpError::new(400, "Bad Request", "missing HTTP version"))?;
 
     if request_parts.next().is_some() {
-        return Err(HttpError::new(
-            400,
-            "Bad Request",
-            "invalid request line",
-        ));
+        return Err(HttpError::new(400, "Bad Request", "invalid request line"));
     }
-
     if version != "HTTP/1.1" && version != "HTTP/1.0" {
         return Err(HttpError::new(
             505,
@@ -224,7 +222,6 @@ fn parse_head(header_text: &str) -> Result<(String, String, HashMap<String, Stri
             "only HTTP/1.0 and HTTP/1.1 are supported",
         ));
     }
-
     if !path.starts_with('/') || path.contains(' ') {
         return Err(HttpError::new(400, "Bad Request", "invalid request path"));
     }
@@ -244,7 +241,6 @@ fn parse_head(header_text: &str) -> Result<(String, String, HashMap<String, Stri
         if name.is_empty() {
             return Err(HttpError::new(400, "Bad Request", "empty header name"));
         }
-
         if name == "content-length" && headers.contains_key(&name) {
             return Err(HttpError::new(
                 400,
@@ -260,22 +256,27 @@ fn parse_head(header_text: &str) -> Result<(String, String, HashMap<String, Stri
 }
 
 async fn route(request: Request, state: LocalApiState) -> Response {
-    match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/healthz") => Response::json(
+    if request.method == "GET" && request.path == "/healthz" {
+        return Response::json(
             200,
             "OK",
             format!(
                 "{{\"status\":\"ok\",\"version\":\"{}\"}}",
                 env!("CARGO_PKG_VERSION")
             ),
-        ),
-        ("GET", "/readyz") => route_ready(state).await,
-        ("POST", "/v1/tasks") => route_enqueue(request, state).await,
-        _ if request.method == "GET" && request.path.starts_with("/v1/tasks/") => {
-            route_get_task(request.path, state).await
-        }
-        _ => Response::error(404, "Not Found", "route not found"),
+        );
     }
+    if request.method == "GET" && request.path == "/readyz" {
+        return route_ready(state).await;
+    }
+    if request.method == "POST" && request.path == "/v1/tasks" {
+        return route_enqueue(request, state).await;
+    }
+    if request.method == "GET" && request.path.starts_with("/v1/tasks/") {
+        return route_get_task(request.path, state).await;
+    }
+
+    Response::error(404, "Not Found", "route not found")
 }
 
 async fn route_ready(state: LocalApiState) -> Response {
@@ -323,11 +324,7 @@ async fn route_enqueue(request: Request, state: LocalApiState) -> Response {
     let payload = match String::from_utf8(request.body) {
         Ok(value) => value,
         Err(_) => {
-            return Response::error(
-                400,
-                "Bad Request",
-                "task payload body must be valid UTF-8",
-            )
+            return Response::error(400, "Bad Request", "task payload body must be valid UTF-8")
         }
     };
 
@@ -351,10 +348,7 @@ async fn route_enqueue(request: Request, state: LocalApiState) -> Response {
         Ok(task_id) => Response::json(
             202,
             "Accepted",
-            format!(
-                "{{\"task_id\":{},\"status\":\"PENDING\"}}",
-                task_id.value()
-            ),
+            format!("{{\"task_id\":{},\"status\":\"PENDING\"}}", task_id.value()),
         ),
         Err(error) => Response::error(500, "Internal Server Error", &error.to_string()),
     }
@@ -550,10 +544,8 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_content_length() {
-        let error = parse_head(
-            "POST /v1/tasks HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2",
-        )
-        .unwrap_err();
+        let error = parse_head("POST /v1/tasks HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2")
+            .unwrap_err();
         assert_eq!(error.status, 400);
     }
 
@@ -564,10 +556,7 @@ mod tests {
 
     #[tokio::test]
     async fn enqueue_and_read_task_snapshot() {
-        let db_path = std::env::temp_dir().join(format!(
-            "local_api_{}.db",
-            rand::random::<u64>()
-        ));
+        let db_path = std::env::temp_dir().join(format!("local_api_{}.db", rand::random::<u64>()));
         let queue = AsyncRobustSinkhornQueue::new(&db_path);
         queue.ensure_schema().await.unwrap();
         let state = LocalApiState::new(queue, &db_path);
@@ -576,12 +565,8 @@ mod tests {
         enqueue
             .headers
             .insert("x-task-name".into(), "document.process".into());
-        enqueue
-            .headers
-            .insert("x-task-type".into(), "cpu".into());
-        enqueue
-            .headers
-            .insert("x-task-priority".into(), "9".into());
+        enqueue.headers.insert("x-task-type".into(), "cpu".into());
+        enqueue.headers.insert("x-task-priority".into(), "9".into());
         enqueue.body = br#"{"document_id":"abc"}"#.to_vec();
 
         let created = route(enqueue, state.clone()).await;
