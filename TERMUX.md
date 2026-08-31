@@ -23,7 +23,7 @@ aarch64-linux-android release binary
 Android / Termux
       |
       v
-chmod +x + run
+checksum + chmod +x + run
 ```
 
 ## Supported first target
@@ -52,22 +52,7 @@ Replace `<version>` with a published tag such as `v0.1.0`.
 
 ```sh
 pkg install -y curl coreutils
-mkdir -p "$HOME/.local/bin"
-cd "$HOME/.local/bin"
-
-curl -fL \
-  "https://github.com/Ahmadfauzi34/Task-que-que/releases/download/<version>/robust-sinkhorn-queue-aarch64-linux-android" \
-  -o robust-sinkhorn-queue
-
-curl -fL \
-  "https://github.com/Ahmadfauzi34/Task-que-que/releases/download/<version>/robust-sinkhorn-queue-aarch64-linux-android.sha256" \
-  -o robust-sinkhorn-queue.sha256
-```
-
-The checksum file contains the release filename, so verify it before renaming or from a temporary directory using the original name. A simple flow is:
-
-```sh
-mkdir -p "$HOME/tmp/robust-queue-install"
+mkdir -p "$HOME/tmp/robust-queue-install" "$HOME/.local/bin"
 cd "$HOME/tmp/robust-queue-install"
 
 curl -fLO \
@@ -87,12 +72,6 @@ Add the user binary directory to PATH if needed:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Then run:
-
-```sh
-robust-sinkhorn-queue
-```
-
 ## Install from a GitHub Actions artifact
 
 The `Android Termux Binary` workflow uploads an artifact named:
@@ -109,6 +88,68 @@ robust-sinkhorn-queue-aarch64-linux-android.sha256
 ```
 
 Artifacts are intended for CI validation and development builds. Tagged GitHub Releases are the preferred distribution path for stable versions.
+
+## Runtime commands
+
+Running the binary with no arguments is intentionally safe and only prints help:
+
+```sh
+robust-sinkhorn-queue
+```
+
+Check version:
+
+```sh
+robust-sinkhorn-queue version
+```
+
+Validate that the runtime can create/open the database and ensure the schema:
+
+```sh
+mkdir -p "$HOME/.task-queue"
+robust-sinkhorn-queue doctor --db "$HOME/.task-queue/queue.db"
+```
+
+Expected shape:
+
+```text
+status   : ok
+version  : 0.1.0
+os       : android
+arch     : aarch64
+database : .../.task-queue/queue.db
+schema   : ready
+```
+
+Run the persistent maintenance daemon:
+
+```sh
+robust-sinkhorn-queue serve --db "$HOME/.task-queue/queue.db"
+```
+
+`serve` currently owns only queue maintenance responsibilities. It ensures the schema and periodically recovers expired task leases. It intentionally does **not** expose a network API and does **not** execute arbitrary queued task payloads.
+
+Example startup:
+
+```text
+robust-sinkhorn-queue 0.1.0
+mode                 : serve
+database             : .../.task-queue/queue.db
+maintenance interval : 2000 ms
+network API          : disabled
+status               : ready
+press Ctrl+C to stop
+```
+
+Stop it with `Ctrl+C`.
+
+For a self-contained functional demonstration of enqueue -> dispatch -> worker execution -> completion, use a separate demo database:
+
+```sh
+robust-sinkhorn-queue demo --db "$HOME/.task-queue/demo.db"
+```
+
+The `demo` command is deliberately separated from `serve` so the production daemon never marks real tasks complete using a simulated handler.
 
 ## What is intentionally not required on Termux
 
@@ -156,6 +197,18 @@ GitHub Release assets
 
 ## Validation boundary
 
-GitHub Actions validates that the produced file is an AArch64 ELF and rejects an obvious glibc-linked output. The definitive runtime compatibility check is still execution on an Android/Termux ARM64 device.
+The Android ARM64 artifact path has now been validated both in GitHub Actions and on a real Termux ARM64 device:
 
-Do not treat a successful cross-build alone as proof that every Android device is supported. The first real-device run should be kept as a release gate before calling the binary generally supported.
+```text
+SHA256 verification       OK
+AArch64 ELF               OK
+/system/bin/linker64      OK
+Android 21 target         OK
+process execution         OK
+SQLite database creation  OK
+queue task processing     OK
+graceful shutdown         OK
+exit code                 0
+```
+
+This proves the tested Android/Termux ARM64 path works without a Rust toolchain on the device. It does not imply that every Android version, vendor ROM, CPU architecture, or Termux environment is supported.
