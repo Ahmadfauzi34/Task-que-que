@@ -121,7 +121,9 @@ fn parse_db_option(args: &[String], command: &str) -> Result<PathBuf, String> {
                 index += 2;
             }
             unknown => {
-                return Err(format!("unknown option '{unknown}' for command '{command}'"));
+                return Err(format!(
+                    "unknown option '{unknown}' for command '{command}'"
+                ));
             }
         }
     }
@@ -189,7 +191,10 @@ async fn run_serve(db_path: PathBuf, maintenance_interval: Duration) -> QueueRes
     println!("robust-sinkhorn-queue {}", env!("CARGO_PKG_VERSION"));
     println!("mode                 : serve");
     println!("database             : {}", db_path.display());
-    println!("maintenance interval : {} ms", maintenance_interval.as_millis());
+    println!(
+        "maintenance interval : {} ms",
+        maintenance_interval.as_millis()
+    );
     println!("network API          : disabled");
     println!("status               : ready");
     println!("press Ctrl+C to stop");
