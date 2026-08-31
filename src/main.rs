@@ -186,12 +186,15 @@ fn parse_serve_options(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_loopback_addr(value: &str) -> Result<SocketAddr, String> {
-    let address = value
-        .parse::<SocketAddr>()
-        .map_err(|_| "--listen must be a numeric loopback IP:port, e.g. 127.0.0.1:7331".to_string())?;
+    let address = value.parse::<SocketAddr>().map_err(|_| {
+        "--listen must be a numeric loopback IP:port, e.g. 127.0.0.1:7331".to_string()
+    })?;
 
     if !address.ip().is_loopback() {
-        return Err("--listen must use a loopback address; expose Bun/Cloudflare, not the queue daemon".into());
+        return Err(
+            "--listen must use a loopback address; expose Bun/Cloudflare, not the queue daemon"
+                .into(),
+        );
     }
     if address.port() == 0 {
         return Err("--listen port must be greater than zero".into());
@@ -223,7 +226,9 @@ async fn run_serve(
     queue.ensure_schema().await?;
 
     let listener = TcpListener::bind(listen_addr).await.map_err(|error| {
-        QueueError::InvalidState(format!("failed to bind local API at {listen_addr}: {error}"))
+        QueueError::InvalidState(format!(
+            "failed to bind local API at {listen_addr}: {error}"
+        ))
     })?;
     let api_state = LocalApiState::new(queue.clone(), &db_path);
 
