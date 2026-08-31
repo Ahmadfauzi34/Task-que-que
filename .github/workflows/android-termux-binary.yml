@@ -108,11 +108,13 @@ jobs:
         run: |
           set -euo pipefail
           TAG="$GITHUB_REF_NAME"
+          REPO="$GITHUB_REPOSITORY"
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" release/* --clobber
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber --repo "$REPO"
           else
             gh release create "$TAG" release/* \
+              --repo "$REPO" \
               --verify-tag \
               --title "$TAG" \
               --generate-notes
