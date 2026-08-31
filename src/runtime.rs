@@ -7,12 +7,16 @@ use tokio::time::{interval, MissedTickBehavior};
 
 use crate::sync_queue::QueueResult;
 use crate::tokio_queue::AsyncRobustSinkhornQueue;
-use crate::value::{ClaimedTask, Epsilon, LeaseDuration, TaskId, WorkerDescriptor, WorkerId};
+use crate::value::{
+    ClaimedTask, Epsilon, LeaseDuration, LeaseGeneration, LeaseMutation, TaskId, WorkerDescriptor,
+    WorkerId,
+};
 
 pub async fn run_with_heartbeat<Fut>(
     queue: AsyncRobustSinkhornQueue,
     task_id: TaskId,
     worker_id: WorkerId,
+    lease_generation: LeaseGeneration,
     lease: LeaseDuration,
     fut: Fut,
 ) -> Result<(), String>
@@ -27,11 +31,19 @@ where
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                match queue.heartbeat(task_id, worker_id.clone(), lease).await {
-                    Ok(true) => {}
-                    Ok(false) => {
+                match queue
+                    .heartbeat(
+                        task_id,
+                        worker_id.clone(),
+                        lease_generation,
+                        lease,
+                    )
+                    .await
+                {
+                    Ok(LeaseMutation::Applied) => {}
+                    Ok(LeaseMutation::Stale) => {
                         return Err(
-                            "lease hilang atau task tidak lagi RUNNING".into()
+                            "lease hilang, kedaluwarsa, atau generation sudah stale".into()
                         );
                     }
                     Err(e) => {
@@ -75,8 +87,7 @@ where
         match claimed {
             Some(task) => {
                 let task_id = task.id;
-                let retry_count = task.retry_count;
-                let max_retries = task.max_retries;
+                let lease_generation = task.lease_generation;
 
                 let fut = (*handler)(task);
 
@@ -84,6 +95,7 @@ where
                     queue.clone(),
                     task_id,
                     worker.worker_id.clone(),
+                    lease_generation,
                     lease,
                     fut,
                 )
@@ -91,20 +103,31 @@ where
 
                 match result {
                     Ok(()) => {
-                        queue
-                            .complete_task(task_id, worker.worker_id.clone())
+                        let transition = queue
+                            .complete_task(
+                                task_id,
+                                worker.worker_id.clone(),
+                                lease_generation,
+                            )
                             .await?;
+
+                        if transition == LeaseMutation::Stale {
+                            continue;
+                        }
                     }
                     Err(err) => {
-                        queue
+                        let transition = queue
                             .fail_task(
                                 task_id,
                                 worker.worker_id.clone(),
+                                lease_generation,
                                 &err,
-                                retry_count,
-                                max_retries,
                             )
                             .await?;
+
+                        if transition == LeaseMutation::Stale {
+                            continue;
+                        }
                     }
                 }
             }
