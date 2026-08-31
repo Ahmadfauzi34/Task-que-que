@@ -1,1 +1,3 @@
 /target
+/gateway/.check-dist
+/gateway/node_modules
