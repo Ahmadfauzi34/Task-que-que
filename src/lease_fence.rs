@@ -111,9 +111,7 @@ impl LeaseFence {
                 .unwrap_or(0);
 
             let next_generation = current_generation.checked_add(1).ok_or_else(|| {
-                QueueError::InvalidState(format!(
-                    "lease generation overflow for task_id={id}"
-                ))
+                QueueError::InvalidState(format!("lease generation overflow for task_id={id}"))
             })?;
 
             tx.execute(
