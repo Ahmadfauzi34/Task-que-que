@@ -140,10 +140,8 @@ impl AsyncRobustSinkhornQueue {
     ) -> sync_queue::QueueResult<LeaseMutation> {
         let worker = worker_id.into_string();
 
-        self.blocking_fence(move |fence| {
-            fence.complete_task(task_id.value(), &worker, generation)
-        })
-        .await
+        self.blocking_fence(move |fence| fence.complete_task(task_id.value(), &worker, generation))
+            .await
     }
 
     pub async fn fail_task(
