@@ -46,7 +46,35 @@ Expected output for this binary:
 aarch64
 ```
 
-## Install from a tagged GitHub Release
+## One-line install from the latest Release
+
+Once a tagged GitHub Release exists, Termux installation can be done without Rust/Cargo/NDK:
+
+```sh
+pkg install -y curl coreutils
+curl -fsSL https://raw.githubusercontent.com/Ahmadfauzi34/Task-que-que/main/install-termux.sh | sh
+```
+
+The installer:
+
+- accepts only Android ARM64 (`aarch64`/`arm64`) for the current release target
+- downloads the binary and `.sha256` from the latest GitHub Release
+- verifies SHA256 before installation
+- installs the executable to `$HOME/.local/bin/robust-sinkhorn-queue`
+- creates `$HOME/.task-queue`
+- runs `version` and `doctor` as post-install checks
+- does not install Rust, Cargo, a C compiler, or the Android NDK
+
+Install a specific release instead of `latest`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Ahmadfauzi34/Task-que-que/main/install-termux.sh \
+  | TASK_QUEUE_VERSION=v0.1.0 sh
+```
+
+Custom install/data directories are also supported through `TASK_QUEUE_INSTALL_DIR` and `TASK_QUEUE_DATA_DIR`.
+
+## Manual install from a tagged GitHub Release
 
 Replace `<version>` with a published tag such as `v0.1.0`.
 
@@ -193,6 +221,9 @@ Android ARM64 build
       |
       v
 GitHub Release assets
+      |
+      v
+curl installer resolves latest release
 ```
 
 ## Validation boundary
