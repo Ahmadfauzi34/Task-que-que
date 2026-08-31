@@ -1,6 +1,35 @@
 use std::time::Duration;
 
+use uuid::Uuid;
+
 use crate::sync_queue::{QueueError, QueueResult};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TraceId(String);
+
+impl TraceId {
+    pub fn generate() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl Default for TraceId {
+    fn default() -> Self {
+        Self::generate()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TaskId(i64);
@@ -311,6 +340,7 @@ pub struct EnqueueCommand {
     pub payload: TaskPayload,
     pub priority: Priority,
     pub max_retries: MaxRetries,
+    pub trace_id: Option<TraceId>,
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +351,7 @@ pub struct DispatchedTask {
     pub priority: Priority,
     pub worker_id: WorkerId,
     pub transport_score: TransportScore,
+    pub trace_id: TraceId,
 }
 
 impl DispatchedTask {
@@ -332,6 +363,7 @@ impl DispatchedTask {
             priority: Priority::new(value.priority),
             worker_id: WorkerId::new(value.worker_id),
             transport_score: TransportScore::new(value.transport_score),
+            trace_id: TraceId::new(value.trace_id),
         }
     }
 }
@@ -344,6 +376,7 @@ pub struct ClaimedTask {
     pub payload: TaskPayload,
     pub retry_count: RetryCount,
     pub max_retries: MaxRetries,
+    pub trace_id: TraceId,
 }
 
 impl ClaimedTask {
@@ -355,6 +388,7 @@ impl ClaimedTask {
             payload: TaskPayload::new(value.payload),
             retry_count: RetryCount::new(value.retry_count),
             max_retries: MaxRetries::new(value.max_retries).unwrap_or(MaxRetries(0)),
+            trace_id: TraceId::new(value.trace_id),
         }
     }
 }

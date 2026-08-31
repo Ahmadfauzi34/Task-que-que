@@ -1,11 +1,13 @@
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 use tokio::time::{interval, MissedTickBehavior};
+use tracing::{debug, info, info_span, warn, Instrument};
 
-use crate::sync_queue::QueueResult;
+use crate::metrics;
+use crate::sync_queue::{QueueError, QueueResult};
 use crate::tokio_queue::AsyncRobustSinkhornQueue;
 use crate::value::{ClaimedTask, Epsilon, LeaseDuration, TaskId, WorkerDescriptor, WorkerId};
 
@@ -19,32 +21,60 @@ pub async fn run_with_heartbeat<Fut>(
 where
     Fut: Future<Output = Result<(), String>> + Send,
 {
-    let mut tick = interval(lease.heartbeat_interval());
-    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let exec_span = info_span!(
+        "queue.task.execution",
+        task.id = task_id.value(),
+        worker.id = %worker_id.as_str()
+    );
 
-    tokio::pin!(fut);
+    async move {
+        let mut tick = interval(lease.heartbeat_interval());
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    loop {
-        tokio::select! {
-            _ = tick.tick() => {
-                match queue.heartbeat(task_id, worker_id.clone(), lease).await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        return Err(
-                            "lease hilang atau task tidak lagi RUNNING".into()
-                        );
-                    }
-                    Err(e) => {
-                        return Err(format!("heartbeat error: {e}"));
+        let mut heartbeat_count: u64 = 0;
+        tokio::pin!(fut);
+
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    heartbeat_count += 1;
+                    let hb_span = info_span!(
+                        "queue.heartbeat",
+                        heartbeat.count = heartbeat_count,
+                        task.id = task_id.value()
+                    );
+
+                    let result = queue
+                        .heartbeat(task_id, worker_id.clone(), lease)
+                        .instrument(hb_span)
+                        .await;
+
+                    match result {
+                        Ok(true) => {
+                            debug!("heartbeat succeeded");
+                        }
+                        Ok(false) => {
+                            metrics::record_heartbeat_failure();
+                            warn!("lease lost during heartbeat");
+                            return Err("lease hilang atau task tidak lagi RUNNING".into());
+                        }
+                        Err(e) => {
+                            metrics::record_heartbeat_failure();
+                            warn!(error = %e, "heartbeat failed");
+                            return Err(format!("heartbeat error: {e}"));
+                        }
                     }
                 }
-            }
 
-            res = &mut fut => {
-                return res;
+                res = &mut fut => {
+                    info!(heartbeat.count = heartbeat_count, "task execution finished");
+                    return res;
+                }
             }
         }
     }
+    .instrument(exec_span)
+    .await
 }
 
 pub async fn run_worker_loop<F, Fut>(
@@ -59,66 +89,117 @@ where
     F: Fn(ClaimedTask) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), String>> + Send + 'static,
 {
-    let poll_interval = if poll_interval.as_nanos() == 0 {
-        Duration::from_millis(100)
-    } else {
-        poll_interval
-    };
+    let loop_span = info_span!(
+        "queue.worker.loop",
+        worker.id = %worker.worker_id.as_str(),
+        worker.kind = ?worker.kind,
+        slots = worker.available_slots.value()
+    );
 
-    loop {
-        if *shutdown.borrow() {
-            return Ok(());
-        }
+    async move {
+        let poll_interval = if poll_interval.as_nanos() == 0 {
+            Duration::from_millis(100)
+        } else {
+            poll_interval
+        };
 
-        let claimed = queue.claim_task(worker.worker_id.clone()).await?;
+        let mut iteration: u64 = 0;
 
-        match claimed {
-            Some(task) => {
-                let task_id = task.id;
-                let retry_count = task.retry_count;
-                let max_retries = task.max_retries;
-
-                let fut = (*handler)(task);
-
-                let result = run_with_heartbeat(
-                    queue.clone(),
-                    task_id,
-                    worker.worker_id.clone(),
-                    lease,
-                    fut,
-                )
-                .await;
-
-                match result {
-                    Ok(()) => {
-                        queue
-                            .complete_task(task_id, worker.worker_id.clone())
-                            .await?;
-                    }
-                    Err(err) => {
-                        queue
-                            .fail_task(
-                                task_id,
-                                worker.worker_id.clone(),
-                                &err,
-                                retry_count,
-                                max_retries,
-                            )
-                            .await?;
-                    }
-                }
+        loop {
+            if *shutdown.borrow() {
+                info!(iterations = iteration, "worker loop shutting down");
+                return Ok(());
             }
 
-            None => {
-                tokio::select! {
-                    _ = tokio::time::sleep(poll_interval) => {}
-                    _ = shutdown.changed() => {
-                        return Ok(());
+            iteration += 1;
+            let iter_span = info_span!("queue.worker.iteration", iteration = iteration);
+
+            async {
+                let claimed = queue.claim_task(worker.worker_id.clone()).await?;
+
+                match claimed {
+                    Some(task) => {
+                        let task_id = task.id;
+                        let retry_count = task.retry_count;
+                        let max_retries = task.max_retries;
+                        let trace_id = task.trace_id.clone();
+                        let task_type = task.task_kind.to_db();
+
+                        info!(
+                            task.id = task_id.value(),
+                            task.name = %task.task_name.as_str(),
+                            trace.id = %trace_id.as_str(),
+                            retry.count = retry_count.value(),
+                            "task claimed, starting execution"
+                        );
+
+                        let execution_start = Instant::now();
+                        let fut = (*handler)(task);
+
+                        let result = run_with_heartbeat(
+                            queue.clone(),
+                            task_id,
+                            worker.worker_id.clone(),
+                            lease,
+                            fut,
+                        )
+                        .await;
+
+                        let execution_duration = execution_start.elapsed();
+                        metrics::record_task_execution_duration(&task_type, execution_duration);
+
+                        match result {
+                            Ok(()) => {
+                                metrics::record_complete(&task_type);
+                                info!(task.id = task_id.value(), "task completed successfully");
+                                queue
+                                    .complete_task(task_id, worker.worker_id.clone())
+                                    .await?;
+                            }
+                            Err(err) => {
+                                metrics::record_failure(&task_type, "execution_error");
+
+                                if retry_count.value() + 1 < max_retries.value() {
+                                    metrics::record_retry(&task_type, retry_count.value());
+                                }
+
+                                warn!(
+                                    task.id = task_id.value(),
+                                    error = %err,
+                                    "task failed, marking for retry/fail"
+                                );
+                                queue
+                                    .fail_task(
+                                        task_id,
+                                        worker.worker_id.clone(),
+                                        &err,
+                                        retry_count,
+                                        max_retries,
+                                    )
+                                    .await?;
+                            }
+                        }
+                    }
+                    None => {
+                        debug!("no task available, polling later");
+                        tokio::select! {
+                            _ = tokio::time::sleep(poll_interval) => {}
+                            _ = shutdown.changed() => {
+                                info!("shutdown signal received");
+                                return Ok(());
+                            }
+                        }
                     }
                 }
+
+                Ok::<_, QueueError>(())
             }
+            .instrument(iter_span)
+            .await?;
         }
     }
+    .instrument(loop_span)
+    .await
 }
 
 pub fn spawn_worker_slots<F, Fut>(
@@ -159,31 +240,59 @@ where
     W: Fn() -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Vec<WorkerDescriptor>> + Send + 'static,
 {
-    let poll_interval = if poll_interval.as_nanos() == 0 {
-        Duration::from_millis(500)
-    } else {
-        poll_interval
-    };
+    let loop_span = info_span!(
+        "queue.dispatcher.loop",
+        poll_interval_ms = poll_interval.as_millis(),
+        epsilon = epsilon.value(),
+        lease_sec = lease.as_secs_f64()
+    );
 
-    let mut ticker = interval(poll_interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    async move {
+        let poll_interval = if poll_interval.as_nanos() == 0 {
+            Duration::from_millis(500)
+        } else {
+            poll_interval
+        };
 
-    loop {
-        tokio::select! {
-            _ = shutdown.changed() => {
-                return Ok(());
-            }
+        let mut ticker = interval(poll_interval);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-            _ = ticker.tick() => {
-                if *shutdown.borrow() {
+        let mut iteration: u64 = 0;
+
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    info!(iterations = iteration, "dispatcher shutting down");
                     return Ok(());
                 }
 
-                let workers = workers_source().await;
+                _ = ticker.tick() => {
+                    if *shutdown.borrow() {
+                        return Ok(());
+                    }
 
-                queue.recover_expired_leases().await?;
-                queue.dispatch_batch(workers, epsilon, lease).await?;
+                    iteration += 1;
+                    let iter_span = info_span!("queue.dispatcher.iteration", iteration = iteration);
+
+                    async {
+                        let workers = workers_source().await;
+
+                        let recovered = queue.recover_expired_leases().await?;
+                        if recovered > 0 {
+                            info!(recovered.count = recovered, "recovered expired leases");
+                        }
+
+                        let dispatched = queue.dispatch_batch(workers, epsilon, lease).await?;
+                        info!(dispatched.count = dispatched.len(), "dispatch cycle completed");
+
+                        Ok::<_, QueueError>(())
+                    }
+                    .instrument(iter_span)
+                    .await?;
+                }
             }
         }
     }
+    .instrument(loop_span)
+    .await
 }

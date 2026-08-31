@@ -1,10 +1,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tracing::{info, info_span, instrument, Instrument, Span};
+
 use crate::sync_queue::{self, RobustSinkhornQueue};
 use crate::value::{
     ClaimedTask, DispatchedTask, EnqueueCommand, Epsilon, LeaseDuration, MaxRetries, RetryCount,
-    TaskId, WorkerDescriptor, WorkerId,
+    TaskId, TraceId, WorkerDescriptor, WorkerId,
 };
 
 #[derive(Clone)]
@@ -31,36 +33,67 @@ impl AsyncRobustSinkhornQueue {
         T: Send + 'static,
     {
         let inner = self.inner.clone();
+        let parent_span = Span::current();
 
-        tokio::task::spawn_blocking(move || op(inner))
-            .await
-            .map_err(|e| {
-                sync_queue::QueueError::InvalidState(format!("spawn_blocking join error: {e}"))
-            })?
+        tokio::task::spawn_blocking(move || {
+            let _entered = parent_span.enter();
+            op(inner)
+        })
+        .instrument(info_span!("queue.async.spawn_blocking"))
+        .await
+        .map_err(|e| {
+            sync_queue::QueueError::InvalidState(format!("spawn_blocking join error: {e}"))
+        })?
     }
 
     pub async fn ensure_schema(&self) -> sync_queue::QueueResult<()> {
         self.blocking(|q| q.ensure_schema()).await
     }
 
+    #[instrument(
+        name = "queue.async.enqueue",
+        skip(self, cmd),
+        fields(
+            task.name = %cmd.name.as_str(),
+            task.kind = ?cmd.kind,
+            task.priority = cmd.priority.value(),
+            task.trace_id = cmd.trace_id.as_ref().map(|t| t.as_str()).unwrap_or("auto")
+        )
+    )]
     pub async fn enqueue(&self, cmd: EnqueueCommand) -> sync_queue::QueueResult<TaskId> {
+        let trace_id = cmd.trace_id.unwrap_or_else(TraceId::generate);
         let name = cmd.name.into_string();
         let kind = cmd.kind.to_db();
         let payload = cmd.payload.into_string();
         let priority = cmd.priority.value();
         let max_retries = cmd.max_retries.value();
+        let trace_id_str = trace_id.into_string();
 
-        self.blocking(move |q| {
-            q.enqueue(&name, &kind, &payload, priority, max_retries)
-                .map(TaskId::new)
-        })
-        .await
+        let task_id = self
+            .blocking(move |q| {
+                q.enqueue(&name, &kind, &payload, priority, max_retries, &trace_id_str)
+                    .map(TaskId::new)
+            })
+            .await?;
+
+        info!(task.id = task_id.value(), "enqueue completed");
+        Ok(task_id)
     }
 
+    #[instrument(name = "queue.async.recover_expired_leases", skip(self))]
     pub async fn recover_expired_leases(&self) -> sync_queue::QueueResult<usize> {
         self.blocking(|q| q.recover_expired_leases()).await
     }
 
+    #[instrument(
+        name = "queue.async.dispatch_batch",
+        skip(self, workers),
+        fields(
+            worker.count = workers.len(),
+            epsilon = epsilon.value(),
+            lease_sec = lease.as_secs_f64()
+        )
+    )]
     pub async fn dispatch_batch(
         &self,
         workers: Vec<WorkerDescriptor>,
@@ -77,9 +110,17 @@ impl AsyncRobustSinkhornQueue {
             .blocking(move |q| q.dispatch_batch(&sync_workers, eps, lease_sec))
             .await?;
 
-        Ok(raw.into_iter().map(DispatchedTask::from_sync).collect())
+        let dispatched: Vec<DispatchedTask> =
+            raw.into_iter().map(DispatchedTask::from_sync).collect();
+
+        info!(
+            dispatched.count = dispatched.len(),
+            "dispatch batch completed"
+        );
+        Ok(dispatched)
     }
 
+    #[instrument(name = "queue.async.claim_task", skip(self), fields(worker.id = %worker_id.as_str()))]
     pub async fn claim_task(
         &self,
         worker_id: WorkerId,
@@ -91,6 +132,7 @@ impl AsyncRobustSinkhornQueue {
         Ok(raw.map(ClaimedTask::from_sync))
     }
 
+    #[instrument(name = "queue.async.heartbeat", skip(self), fields(task.id = task_id.value(), worker.id = %worker_id.as_str()))]
     pub async fn heartbeat(
         &self,
         task_id: TaskId,
@@ -104,6 +146,7 @@ impl AsyncRobustSinkhornQueue {
             .await
     }
 
+    #[instrument(name = "queue.async.complete_task", skip(self), fields(task.id = task_id.value(), worker.id = %worker_id.as_str()))]
     pub async fn complete_task(
         &self,
         task_id: TaskId,
@@ -115,6 +158,7 @@ impl AsyncRobustSinkhornQueue {
             .await
     }
 
+    #[instrument(name = "queue.async.fail_task", skip(self), fields(task.id = task_id.value(), worker.id = %worker_id.as_str(), error = %error_msg))]
     pub async fn fail_task(
         &self,
         task_id: TaskId,

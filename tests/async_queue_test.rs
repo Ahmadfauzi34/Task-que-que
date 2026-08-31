@@ -55,6 +55,11 @@ async fn test_value_types_validation() {
     assert_eq!(TransportScore::new(1.5).value(), 1.0);
     assert_eq!(TransportScore::new(-0.5).value(), 0.0);
     assert_eq!(TransportScore::new(f64::NAN).value(), 0.0);
+
+    // Test TraceId
+    let tid = TraceId::generate();
+    assert!(!tid.as_str().is_empty());
+    assert_eq!(TraceId::new("custom-trace").as_str(), "custom-trace");
 }
 
 #[tokio::test]
@@ -65,6 +70,7 @@ async fn test_async_queue_flow() {
     let queue = AsyncRobustSinkhornQueue::new(&db_path);
     queue.ensure_schema().await.unwrap();
 
+    let custom_trace = TraceId::new("trace-12345");
     let task_id = queue
         .enqueue(EnqueueCommand {
             name: TaskName::new("gpu_task"),
@@ -72,6 +78,7 @@ async fn test_async_queue_flow() {
             payload: TaskPayload::new("payload_123"),
             priority: Priority::new(10),
             max_retries: MaxRetries::new(3).unwrap(),
+            trace_id: Some(custom_trace.clone()),
         })
         .await
         .unwrap();
@@ -93,6 +100,7 @@ async fn test_async_queue_flow() {
 
     assert_eq!(dispatched.len(), 1);
     assert_eq!(dispatched[0].task_id.value(), task_id.value());
+    assert_eq!(dispatched[0].trace_id.as_str(), "trace-12345");
 
     let claimed = queue
         .claim_task(WorkerId::new("w1"))
@@ -101,6 +109,7 @@ async fn test_async_queue_flow() {
         .expect("task should be claimed");
 
     assert_eq!(claimed.id.value(), task_id.value());
+    assert_eq!(claimed.trace_id.as_str(), "trace-12345");
 
     let hb = queue
         .heartbeat(task_id, WorkerId::new("w1"), lease)
@@ -131,6 +140,7 @@ async fn test_lease_expiration_and_recovery() {
             payload: TaskPayload::new("temp"),
             priority: Priority::new(5),
             max_retries: MaxRetries::new(3).unwrap(),
+            trace_id: None,
         })
         .await
         .unwrap();
@@ -142,7 +152,6 @@ async fn test_lease_expiration_and_recovery() {
         available_slots: SlotCount::new(1).unwrap(),
     };
 
-    // Dispatch with a micro lease duration of 1ms
     let lease = LeaseDuration::new(Duration::from_millis(1)).unwrap();
     let epsilon = Epsilon::new(1.5).unwrap();
 
@@ -154,14 +163,11 @@ async fn test_lease_expiration_and_recovery() {
     assert_eq!(dispatched.len(), 1);
     assert_eq!(dispatched[0].task_id.value(), task_id.value());
 
-    // Sleep past the lease duration
     tokio::time::sleep(Duration::from_millis(10)).await;
 
-    // Recover expired leases
     let recovered = queue.recover_expired_leases().await.unwrap();
     assert_eq!(recovered, 1);
 
-    // After recovery, task should be back in PENDING status, claimable by next dispatch
     let lease2 = LeaseDuration::new(Duration::from_secs(60)).unwrap();
     let dispatched_again = queue
         .dispatch_batch(vec![worker.clone()], epsilon, lease2)
@@ -188,6 +194,7 @@ async fn test_task_fail_and_retry_backoff() {
             payload: TaskPayload::new("fail_payload"),
             priority: Priority::new(5),
             max_retries: MaxRetries::new(2).unwrap(),
+            trace_id: None,
         })
         .await
         .unwrap();
@@ -203,14 +210,12 @@ async fn test_task_fail_and_retry_backoff() {
     let lease = LeaseDuration::new(Duration::from_secs(10)).unwrap();
     let epsilon = Epsilon::new(1.5).unwrap();
 
-    // First dispatch and claim
     queue
         .dispatch_batch(vec![worker.clone()], epsilon, lease)
         .await
         .unwrap();
     let claimed = queue.claim_task(worker_id.clone()).await.unwrap().unwrap();
 
-    // Fail attempt 1 (retry_count = 0, max_retries = 2)
     queue
         .fail_task(
             claimed.id,
@@ -222,12 +227,9 @@ async fn test_task_fail_and_retry_backoff() {
         .await
         .unwrap();
 
-    // After failure 1, retry_count becomes 1 (< max_retries 2). Task is rescheduled with backoff.
-    // Claiming immediately should return None because it's scheduled in the future
     let claimed_immediate = queue.claim_task(worker_id.clone()).await.unwrap();
     assert!(claimed_immediate.is_none());
 
-    // Fail attempt 2 (retry_count = 1, max_retries = 2) -> Should reach FAILED state
     queue
         .fail_task(
             claimed.id,
@@ -239,7 +241,6 @@ async fn test_task_fail_and_retry_backoff() {
         .await
         .unwrap();
 
-    // Verify task is now FAILED and cannot be claimed even after dispatch
     let dispatched_after_fail = queue
         .dispatch_batch(vec![worker.clone()], epsilon, lease)
         .await
@@ -257,7 +258,6 @@ async fn test_sinkhorn_affinity_dispatch() {
     let queue = AsyncRobustSinkhornQueue::new(&db_path);
     queue.ensure_schema().await.unwrap();
 
-    // Enqueue 1 GPU task and 1 CPU task
     let gpu_task_id = queue
         .enqueue(EnqueueCommand {
             name: TaskName::new("gpu_work"),
@@ -265,6 +265,7 @@ async fn test_sinkhorn_affinity_dispatch() {
             payload: TaskPayload::new("{}"),
             priority: Priority::new(10),
             max_retries: MaxRetries::new(3).unwrap(),
+            trace_id: None,
         })
         .await
         .unwrap();
@@ -276,11 +277,11 @@ async fn test_sinkhorn_affinity_dispatch() {
             payload: TaskPayload::new("{}"),
             priority: Priority::new(10),
             max_retries: MaxRetries::new(3).unwrap(),
+            trace_id: None,
         })
         .await
         .unwrap();
 
-    // Workers: 1 GPU worker (1 slot), 1 CPU worker (1 slot)
     let gpu_worker = WorkerDescriptor {
         worker_id: WorkerId::new("gpu-node-1"),
         kind: WorkerKind::Gpu,
@@ -334,6 +335,7 @@ async fn test_run_with_heartbeat_cancellation_and_failure() {
             payload: TaskPayload::new("{}"),
             priority: Priority::new(1),
             max_retries: MaxRetries::new(1).unwrap(),
+            trace_id: None,
         })
         .await
         .unwrap();
@@ -354,10 +356,8 @@ async fn test_run_with_heartbeat_cancellation_and_failure() {
         .await
         .unwrap();
 
-    // Claim task to put it into RUNNING state
     queue.claim_task(worker_id.clone()).await.unwrap().unwrap();
 
-    // Test successful task completed faster than heartbeat interval
     let task_fut = async {
         tokio::time::sleep(Duration::from_millis(20)).await;
         Ok(())
@@ -366,7 +366,6 @@ async fn test_run_with_heartbeat_cancellation_and_failure() {
 
     assert!(res.is_ok());
 
-    // Test heartbeat failure when task is marked COMPLETED (no longer RUNNING in DB)
     queue
         .complete_task(task_id, worker_id.clone())
         .await
@@ -419,6 +418,7 @@ async fn test_runtime_loops() {
             payload: TaskPayload::new("data"),
             priority: Priority::new(1),
             max_retries: MaxRetries::new(1).unwrap(),
+            trace_id: None,
         })
         .await
         .unwrap();
