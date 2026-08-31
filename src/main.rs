@@ -1,9 +1,11 @@
 use std::env;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
 use std::time::Duration;
 
+use robust_sinkhorn_queue::local_api::{serve_connection, LocalApiState};
 use robust_sinkhorn_queue::runtime::{run_dispatcher_loop, spawn_worker_slots};
 use robust_sinkhorn_queue::tokio_queue::AsyncRobustSinkhornQueue;
 use robust_sinkhorn_queue::value::{
@@ -11,9 +13,11 @@ use robust_sinkhorn_queue::value::{
     TaskName, TaskPayload, WorkerDescriptor, WorkerId, WorkerKind,
 };
 use robust_sinkhorn_queue::{QueueError, QueueResult};
+use tokio::net::TcpListener;
 use tokio::time::MissedTickBehavior;
 
 const DEFAULT_DB_PATH: &str = "queue.db";
+const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:7331";
 const DEFAULT_MAINTENANCE_INTERVAL_MS: u64 = 2_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +26,7 @@ enum Command {
     Version,
     Serve {
         db_path: PathBuf,
+        listen_addr: SocketAddr,
         maintenance_interval: Duration,
     },
     Doctor {
@@ -61,8 +66,9 @@ async fn execute(command: Command) -> QueueResult<()> {
         }
         Command::Serve {
             db_path,
+            listen_addr,
             maintenance_interval,
-        } => run_serve(db_path, maintenance_interval).await,
+        } => run_serve(db_path, listen_addr, maintenance_interval).await,
         Command::Doctor { db_path } => run_doctor(db_path).await,
         Command::Demo { db_path } => run_demo(db_path).await,
     }
@@ -133,6 +139,7 @@ fn parse_db_option(args: &[String], command: &str) -> Result<PathBuf, String> {
 
 fn parse_serve_options(args: &[String]) -> Result<Command, String> {
     let mut db_path = PathBuf::from(DEFAULT_DB_PATH);
+    let mut listen_addr = parse_loopback_addr(DEFAULT_LISTEN_ADDR)?;
     let mut maintenance_interval = Duration::from_millis(DEFAULT_MAINTENANCE_INTERVAL_MS);
     let mut index = 0;
 
@@ -143,6 +150,13 @@ fn parse_serve_options(args: &[String]) -> Result<Command, String> {
                     .get(index + 1)
                     .ok_or_else(|| "--db requires a path".to_string())?;
                 db_path = PathBuf::from(value);
+                index += 2;
+            }
+            "--listen" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "--listen requires an IP:port value".to_string())?;
+                listen_addr = parse_loopback_addr(value)?;
                 index += 2;
             }
             "--maintenance-interval-ms" => {
@@ -166,8 +180,27 @@ fn parse_serve_options(args: &[String]) -> Result<Command, String> {
 
     Ok(Command::Serve {
         db_path,
+        listen_addr,
         maintenance_interval,
     })
+}
+
+fn parse_loopback_addr(value: &str) -> Result<SocketAddr, String> {
+    let address = value.parse::<SocketAddr>().map_err(|_| {
+        "--listen must be a numeric loopback IP:port, e.g. 127.0.0.1:7331".to_string()
+    })?;
+
+    if !address.ip().is_loopback() {
+        return Err(
+            "--listen must use a loopback address; expose Bun/Cloudflare, not the queue daemon"
+                .into(),
+        );
+    }
+    if address.port() == 0 {
+        return Err("--listen port must be greater than zero".into());
+    }
+
+    Ok(address)
 }
 
 async fn run_doctor(db_path: PathBuf) -> QueueResult<()> {
@@ -184,9 +217,20 @@ async fn run_doctor(db_path: PathBuf) -> QueueResult<()> {
     Ok(())
 }
 
-async fn run_serve(db_path: PathBuf, maintenance_interval: Duration) -> QueueResult<()> {
+async fn run_serve(
+    db_path: PathBuf,
+    listen_addr: SocketAddr,
+    maintenance_interval: Duration,
+) -> QueueResult<()> {
     let queue = AsyncRobustSinkhornQueue::new(&db_path);
     queue.ensure_schema().await?;
+
+    let listener = TcpListener::bind(listen_addr).await.map_err(|error| {
+        QueueError::InvalidState(format!(
+            "failed to bind local API at {listen_addr}: {error}"
+        ))
+    })?;
+    let api_state = LocalApiState::new(queue.clone(), &db_path);
 
     println!("robust-sinkhorn-queue {}", env!("CARGO_PKG_VERSION"));
     println!("mode                 : serve");
@@ -195,7 +239,9 @@ async fn run_serve(db_path: PathBuf, maintenance_interval: Duration) -> QueueRes
         "maintenance interval : {} ms",
         maintenance_interval.as_millis()
     );
-    println!("network API          : disabled");
+    println!("network API          : http://{listen_addr} (loopback only)");
+    println!("health               : http://{listen_addr}/healthz");
+    println!("readiness            : http://{listen_addr}/readyz");
     println!("status               : ready");
     println!("press Ctrl+C to stop");
 
@@ -218,6 +264,23 @@ async fn run_serve(db_path: PathBuf, maintenance_interval: Duration) -> QueueRes
                 if recovered > 0 {
                     println!("recovered expired leases: {recovered}");
                 }
+            }
+            accepted = listener.accept() => {
+                let (stream, peer) = accepted.map_err(|error| {
+                    QueueError::InvalidState(format!("local API accept error: {error}"))
+                })?;
+
+                if !peer.ip().is_loopback() {
+                    eprintln!("rejected non-loopback local API peer: {peer}");
+                    continue;
+                }
+
+                let state = api_state.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = serve_connection(stream, state).await {
+                        eprintln!("local API connection error from {peer}: {error}");
+                    }
+                });
             }
         }
     }
@@ -308,9 +371,10 @@ fn print_help() {
     println!(
         "robust-sinkhorn-queue {version}\n\n\
 Usage:\n  robust-sinkhorn-queue <command> [options]\n\n\
-Commands:\n  serve    Run the persistent queue maintenance daemon\n  doctor   Validate runtime + database access and ensure the schema\n  demo     Run the isolated built-in queue/worker demonstration\n  version  Print the binary version\n  help     Print this help\n\n\
-Options:\n  --db <path>                         Database path (default: queue.db)\n  --maintenance-interval-ms <number>  Serve maintenance cadence (default: 2000)\n\n\
-Examples:\n  robust-sinkhorn-queue doctor --db ~/.task-queue/queue.db\n  robust-sinkhorn-queue serve --db ~/.task-queue/queue.db\n  robust-sinkhorn-queue demo --db ./demo.db",
+Commands:\n  serve    Run queue maintenance + localhost-only HTTP API\n  doctor   Validate runtime + database access and ensure the schema\n  demo     Run the isolated built-in queue/worker demonstration\n  version  Print the binary version\n  help     Print this help\n\n\
+Serve options:\n  --db <path>                         Database path (default: queue.db)\n  --listen <loopback-ip:port>         Local API address (default: 127.0.0.1:7331)\n  --maintenance-interval-ms <number>  Maintenance cadence (default: 2000)\n\n\
+Local API:\n  GET  /healthz\n  GET  /readyz\n  POST /v1/tasks       metadata in X-Task-* headers; body is opaque UTF-8 payload\n  GET  /v1/tasks/<id>\n\n\
+Examples:\n  robust-sinkhorn-queue doctor --db ~/.task-queue/queue.db\n  robust-sinkhorn-queue serve --db ~/.task-queue/queue.db\n  robust-sinkhorn-queue serve --db ~/.task-queue/queue.db --listen 127.0.0.1:7331\n  robust-sinkhorn-queue demo --db ./demo.db",
         version = env!("CARGO_PKG_VERSION")
     );
 }
@@ -318,6 +382,10 @@ Examples:\n  robust-sinkhorn-queue doctor --db ~/.task-queue/queue.db\n  robust-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn default_addr() -> SocketAddr {
+        DEFAULT_LISTEN_ADDR.parse().unwrap()
+    }
 
     #[test]
     fn no_args_is_safe_help() {
@@ -330,6 +398,7 @@ mod tests {
             parse_command(["serve"]).unwrap(),
             Command::Serve {
                 db_path: PathBuf::from(DEFAULT_DB_PATH),
+                listen_addr: default_addr(),
                 maintenance_interval: Duration::from_millis(DEFAULT_MAINTENANCE_INTERVAL_MS),
             }
         );
@@ -342,15 +411,27 @@ mod tests {
                 "serve",
                 "--db",
                 "/tmp/custom.db",
+                "--listen",
+                "127.0.0.1:7444",
                 "--maintenance-interval-ms",
                 "750",
             ])
             .unwrap(),
             Command::Serve {
                 db_path: PathBuf::from("/tmp/custom.db"),
+                listen_addr: "127.0.0.1:7444".parse().unwrap(),
                 maintenance_interval: Duration::from_millis(750),
             }
         );
+    }
+
+    #[test]
+    fn serve_rejects_non_loopback_or_zero_port() {
+        assert!(parse_command(["serve", "--listen", "0.0.0.0:7331"]).is_err());
+        assert!(parse_command(["serve", "--listen", "192.168.1.10:7331"]).is_err());
+        assert!(parse_command(["serve", "--listen", "127.0.0.1:0"]).is_err());
+        assert!(parse_command(["serve", "--listen", "localhost:7331"]).is_err());
+        assert!(parse_command(["serve", "--listen", "[::1]:7331"]).is_ok());
     }
 
     #[test]
