@@ -61,10 +61,8 @@ async fn test_value_types_validation() {
 
 #[tokio::test]
 async fn test_fence_schema_upgrades_existing_queue_database() {
-    let db_path = std::env::temp_dir().join(format!(
-        "test_existing_queue_{}.db",
-        rand::random::<u64>()
-    ));
+    let db_path =
+        std::env::temp_dir().join(format!("test_existing_queue_{}.db", rand::random::<u64>()));
 
     let legacy_queue = RobustSinkhornQueue::new(&db_path);
     legacy_queue.ensure_schema().unwrap();
@@ -161,11 +159,7 @@ async fn test_async_queue_flow() {
     assert_eq!(heartbeat, LeaseMutation::Applied);
 
     let completed = queue
-        .complete_task(
-            task_id,
-            worker.worker_id.clone(),
-            claimed.lease_generation,
-        )
+        .complete_task(task_id, worker.worker_id.clone(), claimed.lease_generation)
         .await
         .unwrap();
     assert_eq!(completed, LeaseMutation::Applied);
@@ -181,10 +175,8 @@ async fn test_async_queue_flow() {
 
 #[tokio::test]
 async fn test_expired_lease_reassignment_rejects_same_worker_aba() {
-    let db_path = std::env::temp_dir().join(format!(
-        "test_recovery_fence_{}.db",
-        rand::random::<u64>()
-    ));
+    let db_path =
+        std::env::temp_dir().join(format!("test_recovery_fence_{}.db", rand::random::<u64>()));
 
     let queue = AsyncRobustSinkhornQueue::new(&db_path);
     queue.ensure_schema().await.unwrap();
@@ -250,11 +242,7 @@ async fn test_expired_lease_reassignment_rejects_same_worker_aba() {
     assert!(second.lease_generation.value() > first.lease_generation.value());
 
     let stale_complete = queue
-        .complete_task(
-            task_id,
-            worker.worker_id.clone(),
-            first.lease_generation,
-        )
+        .complete_task(task_id, worker.worker_id.clone(), first.lease_generation)
         .await
         .unwrap();
     assert_eq!(stale_complete, LeaseMutation::Stale);
@@ -525,11 +513,7 @@ async fn test_run_with_heartbeat_cancellation_and_failure() {
     assert!(res.is_ok());
 
     let completed = queue
-        .complete_task(
-            task_id,
-            worker.worker_id.clone(),
-            claimed.lease_generation,
-        )
+        .complete_task(task_id, worker.worker_id.clone(), claimed.lease_generation)
         .await
         .unwrap();
     assert_eq!(completed, LeaseMutation::Applied);
