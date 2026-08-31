@@ -1,0 +1,119 @@
+name: Android Termux Binary
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+
+jobs:
+  build-android-arm64:
+    name: Build Android ARM64 binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain and Android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Verify Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${ANDROID_NDK_HOME:-}"
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$NDK_BIN/aarch64-linux-android21-clang"
+          test -x "$NDK_BIN/llvm-ar"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+
+      - name: Build release binary for Android ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android21-clang"
+          export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android21-clang"
+          export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+
+          cargo build --release --locked --target aarch64-linux-android
+
+      - name: Validate produced ELF
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/aarch64-linux-android/release/robust-sinkhorn-queue"
+
+          test -f "$BIN"
+          file "$BIN"
+          file "$BIN" | grep -Eq "ARM aarch64|aarch64"
+          readelf -l "$BIN" | grep -F "/system/bin/linker64"
+
+          if readelf -d "$BIN" | grep -Eq "libc\.so\.6|ld-linux"; then
+            echo "Unexpected glibc dependency detected"
+            exit 1
+          fi
+
+      - name: Prepare distribution files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/aarch64-linux-android/release/robust-sinkhorn-queue \
+            dist/robust-sinkhorn-queue-aarch64-linux-android
+          (
+            cd dist
+            sha256sum robust-sinkhorn-queue-aarch64-linux-android \
+              > robust-sinkhorn-queue-aarch64-linux-android.sha256
+          )
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: robust-sinkhorn-queue-termux-arm64
+          path: |
+            dist/robust-sinkhorn-queue-aarch64-linux-android
+            dist/robust-sinkhorn-queue-aarch64-linux-android.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-release:
+    name: Publish tagged binary release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-android-arm64
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: robust-sinkhorn-queue-termux-arm64
+          path: release
+
+      - name: Publish release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* \
+              --verify-tag \
+              --title "$TAG" \
+              --generate-notes
+          fi
