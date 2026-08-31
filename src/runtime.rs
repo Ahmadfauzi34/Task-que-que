@@ -104,11 +104,7 @@ where
                 match result {
                     Ok(()) => {
                         let transition = queue
-                            .complete_task(
-                                task_id,
-                                worker.worker_id.clone(),
-                                lease_generation,
-                            )
+                            .complete_task(task_id, worker.worker_id.clone(), lease_generation)
                             .await?;
 
                         if transition == LeaseMutation::Stale {
@@ -117,12 +113,7 @@ where
                     }
                     Err(err) => {
                         let transition = queue
-                            .fail_task(
-                                task_id,
-                                worker.worker_id.clone(),
-                                lease_generation,
-                                &err,
-                            )
+                            .fail_task(task_id, worker.worker_id.clone(), lease_generation, &err)
                             .await?;
 
                         if transition == LeaseMutation::Stale {
