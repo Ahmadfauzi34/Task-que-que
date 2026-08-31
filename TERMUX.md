@@ -149,13 +149,19 @@ database : .../.task-queue/queue.db
 schema   : ready
 ```
 
-Run the persistent maintenance daemon:
+Run the persistent maintenance daemon and localhost API:
 
 ```sh
 robust-sinkhorn-queue serve --db "$HOME/.task-queue/queue.db"
 ```
 
-`serve` currently owns only queue maintenance responsibilities. It ensures the schema and periodically recovers expired task leases. It intentionally does **not** expose a network API and does **not** execute arbitrary queued task payloads.
+The default API bind is deliberately loopback-only:
+
+```text
+127.0.0.1:7331
+```
+
+`serve` owns schema/lease maintenance plus a small internal HTTP API intended for a same-device gateway such as Bun. It does **not** execute arbitrary task payloads and it refuses non-loopback `--listen` addresses. Public traffic should terminate at the Bun/Cloudflare layer rather than at this Rust API.
 
 Example startup:
 
@@ -164,12 +170,84 @@ robust-sinkhorn-queue 0.1.0
 mode                 : serve
 database             : .../.task-queue/queue.db
 maintenance interval : 2000 ms
-network API          : disabled
+network API          : http://127.0.0.1:7331 (loopback only)
+health               : http://127.0.0.1:7331/healthz
+readiness            : http://127.0.0.1:7331/readyz
 status               : ready
 press Ctrl+C to stop
 ```
 
 Stop it with `Ctrl+C`.
+
+## Local API contract
+
+Health and readiness:
+
+```sh
+curl -sS http://127.0.0.1:7331/healthz
+curl -sS http://127.0.0.1:7331/readyz
+```
+
+Enqueue a task. Metadata is carried by internal `X-Task-*` headers while the request body is stored as the opaque UTF-8 payload:
+
+```sh
+curl -sS -X POST http://127.0.0.1:7331/v1/tasks \
+  -H 'X-Task-Name: document.process' \
+  -H 'X-Task-Type: cpu' \
+  -H 'X-Task-Priority: 10' \
+  -H 'X-Task-Max-Retries: 3' \
+  --data-binary '{"document_id":"abc"}'
+```
+
+Expected response shape:
+
+```json
+{"task_id":1,"status":"PENDING"}
+```
+
+Read a task snapshot without exposing SQLite directly:
+
+```sh
+curl -sS http://127.0.0.1:7331/v1/tasks/1
+```
+
+The snapshot intentionally excludes the task payload. It exposes queue state, retry counters, lease timestamps, owner (when present), and lease generation for operational inspection.
+
+Current local API boundaries:
+
+```text
+GET  /healthz
+GET  /readyz
+POST /v1/tasks
+GET  /v1/tasks/<id>
+```
+
+The HTTP implementation limits headers to 16 KiB, payload bodies to 1 MiB, closes each connection after one response, rejects transfer-encoding/chunked requests, and applies request/response I/O timeouts. These constraints keep the internal daemon protocol bounded while Bun remains the richer external API surface.
+
+## Bun boundary
+
+The intended topology is:
+
+```text
+Internet
+   |
+   v
+Cloudflare Tunnel
+   |
+   v
+Bun gateway (public API, auth, rate limits, validation)
+   |
+   v
+127.0.0.1:7331
+   |
+   v
+Rust queue daemon
+   |
+   v
+SQLite queue.db
+```
+
+Bun should never open `queue.db` directly. It should enqueue/query through the localhost contract so queue invariants, lease fencing, and future migrations stay owned by Rust.
 
 For a self-contained functional demonstration of enqueue -> dispatch -> worker execution -> completion, use a separate demo database:
 
