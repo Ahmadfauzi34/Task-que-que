@@ -34,3 +34,27 @@ jobs:
 
       - name: Run unit & integration tests
         run: cargo test --all-targets --verbose
+
+  gateway:
+    name: Bun Gateway
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: latest
+
+      - name: Show Bun version
+        run: bun --version
+
+      - name: Run gateway tests
+        working-directory: gateway
+        run: bun test
+
+      - name: Compile gateway entrypoint
+        working-directory: gateway
+        run: bun build src/server.ts --target=bun --outdir=.check-dist
