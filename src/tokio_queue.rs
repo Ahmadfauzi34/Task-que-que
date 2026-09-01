@@ -100,7 +100,8 @@ impl AsyncRobustSinkhornQueue {
     pub async fn ensure_schema(&self) -> sync_queue::QueueResult<()> {
         self.blocking(|q| q.ensure_schema()).await?;
         self.blocking_fence(|fence| fence.ensure_schema()).await?;
-        self.blocking_idempotency(|store| store.ensure_schema()).await?;
+        self.blocking_idempotency(|store| store.ensure_schema())
+            .await?;
         self.blocking_result(|store| store.ensure_schema()).await
     }
 
