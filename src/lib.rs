@@ -1,6 +1,7 @@
 pub mod idempotency;
 pub mod lease_fence;
 pub mod local_api;
+pub mod retention;
 pub mod runtime;
 pub mod sync_queue;
 pub mod task_query;
