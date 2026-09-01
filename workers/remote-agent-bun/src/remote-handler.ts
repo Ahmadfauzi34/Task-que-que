@@ -277,6 +277,7 @@ export function createRemoteAgentHandler(config: RemoteAgentConfig): WorkerHandl
     async handle(task: RegistryTask, context) {
       const result = await invokeRemoteAgent(task.task_id, task.payload, validated);
       await writeRemoteAgentResultAtomic(context.outputDir, result);
+      return result;
     },
 
     classifyError(error) {
