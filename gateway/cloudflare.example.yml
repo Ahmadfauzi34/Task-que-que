@@ -1,0 +1,18 @@
+# Reference locally-managed Cloudflare Tunnel configuration.
+# Replace every <...> placeholder before use.
+
+tunnel: <TUNNEL_UUID>
+credentials-file: /data/data/com.termux/files/home/.cloudflared/<TUNNEL_UUID>.json
+
+ingress:
+  - hostname: <PUBLIC_HOSTNAME>
+    service: http://127.0.0.1:3000
+    originRequest:
+      access:
+        required: true
+        teamName: <CLOUDFLARE_ACCESS_TEAM_NAME>
+        audTag:
+          - <CLOUDFLARE_ACCESS_APPLICATION_AUD>
+
+  # Required fail-closed catch-all. Unknown hostnames never reach the gateway.
+  - service: http_status:404
