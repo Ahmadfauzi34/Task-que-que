@@ -153,8 +153,8 @@ TASK_ID="$(printf '%s' "$created" | sed -n 's/.*"task_id":\([0-9][0-9]*\).*/\1/p
 [[ -n "$TASK_ID" ]] || fail "public enqueue did not return task id"
 
 snapshot="$(wait_for_task_status "$TASK_ID" COMPLETED)" || fail "valid document task did not complete"
-if printf '%s' "$snapshot" | grep -E 'payload|locked_by|lease_generation|session' >/dev/null; then
-  fail "public completed snapshot leaked worker or payload internals"
+if printf '%s' "$snapshot" | grep -E 'payload|locked_by|lease_generation|session|result_json|result_bytes' >/dev/null; then
+  fail "public completed snapshot leaked worker, payload, or result internals"
 fi
 
 RESULT_FILE="$TMP_DIR/results/task-$TASK_ID.json"
@@ -172,6 +172,17 @@ if grep -F 'hello world' "$RESULT_FILE" >/dev/null; then
   fail "result artifact copied source document text"
 fi
 
+document_projection="$(curl -fsS --max-time 5 "http://127.0.0.1:7331/v1/tasks/$TASK_ID/result")" || fail "document result projection was not durable"
+printf '%s' "$document_projection" | grep -F "\"task_id\":$TASK_ID" >/dev/null || fail "document projection task id mismatch"
+printf '%s' "$document_projection" | grep -F '\"document_id\":\"proof-1\"' >/dev/null || fail "document projection id missing"
+printf '%s' "$document_projection" | grep -F "\\\"sha256\\\":\\\"$EXPECTED_SHA\\\"" >/dev/null || fail "document projection digest mismatch"
+if printf '%s' "$document_projection" | grep -F 'hello world' >/dev/null; then
+  fail "document projection copied source text"
+fi
+if printf '%s' "$document_projection" | grep -F 'lease_generation' >/dev/null; then
+  fail "document result route leaked fence generation"
+fi
+
 INVALID_BODY='{"type":"document.process","payload":{"document_id":"proof-invalid"},"priority":10,"max_retries":0}'
 invalid_created="$(curl -fsS --max-time 5 -X POST http://127.0.0.1:3000/v1/tasks \
   -H "Authorization: Bearer $TOKEN" \
@@ -182,16 +193,18 @@ INVALID_ID="$(printf '%s' "$invalid_created" | sed -n 's/.*"task_id":\([0-9][0-9
 [[ -n "$INVALID_ID" ]] || fail "invalid proof task id missing"
 wait_for_task_status "$INVALID_ID" FAILED >/dev/null || fail "invalid document task did not fail closed"
 [[ ! -e "$TMP_DIR/results/task-$INVALID_ID.json" ]] || fail "invalid task unexpectedly produced an artifact"
+invalid_projection_status="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:7331/v1/tasks/$INVALID_ID/result")"
+[[ "$invalid_projection_status" == "404" ]] || fail "failed document task unexpectedly published a result"
 
-# The 900 ms processing delay is longer than the initial 600 ms task lease.
-# Completion therefore proves that the reference worker renewed its fenced lease.
 echo "Reference document worker proof state"
 echo "public enqueue -> document.process : OK"
 echo "Rust hard capability cpu          : OK"
 echo "processing exceeds initial lease  : OK (900ms > 600ms)"
 echo "task + session heartbeat          : OK"
 echo "atomic deterministic result       : OK"
+echo "fenced SQLite result projection   : OK"
 echo "source text not copied to result  : OK"
+echo "public result disclosure          : NONE"
 echo "public worker metadata disclosure : NONE"
 echo "invalid payload                   : FAILED CLOSED"
 echo "fenced completion                 : OK"
@@ -209,8 +222,8 @@ HASH_ID="$(printf '%s' "$hash_created" | sed -n 's/.*"task_id":\([0-9][0-9]*\).*
 [[ -n "$HASH_ID" ]] || fail "public hash enqueue did not return task id"
 
 hash_snapshot="$(wait_for_task_status "$HASH_ID" COMPLETED)" || fail "valid hash task did not complete"
-if printf '%s' "$hash_snapshot" | grep -E 'payload|locked_by|lease_generation|session' >/dev/null; then
-  fail "public hash snapshot leaked worker or payload internals"
+if printf '%s' "$hash_snapshot" | grep -E 'payload|locked_by|lease_generation|session|result_json|result_bytes' >/dev/null; then
+  fail "public hash snapshot leaked worker, payload, or result internals"
 fi
 
 HASH_RESULT_FILE="$TMP_DIR/results/task-$HASH_ID.json"
@@ -225,6 +238,14 @@ if grep -F "$HASH_DATA" "$HASH_RESULT_FILE" >/dev/null; then
   fail "hash result artifact copied source data"
 fi
 
+hash_projection="$(curl -fsS --max-time 5 "http://127.0.0.1:7331/v1/tasks/$HASH_ID/result")" || fail "hash result projection was not durable"
+printf '%s' "$hash_projection" | grep -F "\"task_id\":$HASH_ID" >/dev/null || fail "hash projection task id mismatch"
+printf '%s' "$hash_projection" | grep -F '\"algorithm\":\"sha256\"' >/dev/null || fail "hash projection algorithm mismatch"
+printf '%s' "$hash_projection" | grep -F "\\\"digest\\\":\\\"$EXPECTED_HASH\\\"" >/dev/null || fail "hash projection digest mismatch"
+if printf '%s' "$hash_projection" | grep -F "$HASH_DATA" >/dev/null; then
+  fail "hash projection copied source data"
+fi
+
 INVALID_HASH_BODY='{"type":"hash.compute","payload":{"data":"no-md5","algorithm":"md5"},"priority":10,"max_retries":0}'
 invalid_hash_created="$(curl -fsS --max-time 5 -X POST http://127.0.0.1:3000/v1/tasks \
   -H "Authorization: Bearer $TOKEN" \
@@ -235,6 +256,8 @@ INVALID_HASH_ID="$(printf '%s' "$invalid_hash_created" | sed -n 's/.*"task_id":\
 [[ -n "$INVALID_HASH_ID" ]] || fail "invalid hash task id missing"
 wait_for_task_status "$INVALID_HASH_ID" FAILED >/dev/null || fail "invalid hash algorithm did not fail closed"
 [[ ! -e "$TMP_DIR/results/task-$INVALID_HASH_ID.json" ]] || fail "invalid hash task unexpectedly produced an artifact"
+invalid_hash_projection_status="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:7331/v1/tasks/$INVALID_HASH_ID/result")"
+[[ "$invalid_hash_projection_status" == "404" ]] || fail "failed hash task unexpectedly published a result"
 
 echo
 echo "Multi-handler worker proof state"
@@ -242,6 +265,7 @@ echo "public enqueue -> hash.compute     : OK"
 echo "same Rust hard capability cpu      : OK"
 echo "exact registry dispatch            : OK"
 echo "sha256 allowlist                   : OK"
+echo "fenced SQLite result projection    : OK"
 echo "source data not copied to result   : OK"
 echo "unsupported md5                    : FAILED CLOSED"
 echo "document.process regression        : OK"
