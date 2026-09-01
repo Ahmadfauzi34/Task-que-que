@@ -25,6 +25,8 @@ jobs:
           sh -n gateway/tests/termux-smoke.sh
           sh -n gateway/tests/trycloudflare-smoke.sh
           sh -n tests/termux-shutdown-smoke.sh
+          sh -n tests/worker-protocol-smoke.sh
+          sh -n tests/termux-worker-protocol-smoke.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -85,3 +87,20 @@ jobs:
 
       - name: Run localhost protocol smoke test
         run: bash gateway/tests/e2e.sh
+
+  worker-integration:
+    name: Worker Protocol Integration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build queue and worker binaries
+        run: cargo build --locked --bin robust-sinkhorn-queue --bin robust-sinkhorn-worker
+
+      - name: Run separated worker data-plane proof
+        run: sh tests/worker-protocol-smoke.sh
