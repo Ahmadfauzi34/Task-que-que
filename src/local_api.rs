@@ -7,6 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+use crate::idempotency::{IdempotencyStore, IdempotentEnqueueResult};
 use crate::task_query::{TaskQueryStore, TaskSnapshot};
 use crate::tokio_queue::AsyncRobustSinkhornQueue;
 use crate::value::{EnqueueCommand, MaxRetries, Priority, TaskKind, TaskName, TaskPayload};
@@ -19,13 +20,16 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct LocalApiState {
     queue: AsyncRobustSinkhornQueue,
     query: TaskQueryStore,
+    idempotency: IdempotencyStore,
 }
 
 impl LocalApiState {
     pub fn new(queue: AsyncRobustSinkhornQueue, db_path: impl Into<PathBuf>) -> Self {
+        let db_path = db_path.into();
         Self {
             queue,
-            query: TaskQueryStore::new(db_path),
+            query: TaskQueryStore::new(db_path.clone()),
+            idempotency: IdempotencyStore::new(db_path),
         }
     }
 }
@@ -290,26 +294,31 @@ async fn route_ready(state: LocalApiState) -> Response {
 
 async fn route_enqueue(request: Request, state: LocalApiState) -> Response {
     let task_name = match required_header(&request.headers, "x-task-name") {
-        Ok(value) => value,
+        Ok(value) => value.to_owned(),
         Err(response) => return response,
     };
     let task_type = match required_header(&request.headers, "x-task-type") {
-        Ok(value) => value,
+        Ok(value) => value.to_owned(),
         Err(response) => return response,
     };
 
-    if let Err(message) = validate_identifier(task_name, 128, "x-task-name") {
+    if let Err(message) = validate_identifier(&task_name, 128, "x-task-name") {
         return Response::error(400, "Bad Request", &message);
     }
-    if let Err(message) = validate_identifier(task_type, 64, "x-task-type") {
+    if let Err(message) = validate_identifier(&task_type, 64, "x-task-type") {
         return Response::error(400, "Bad Request", &message);
     }
+
+    let idempotency = match parse_idempotency_headers(&request.headers) {
+        Ok(value) => value.map(|(key, fingerprint)| (key.to_owned(), fingerprint.to_owned())),
+        Err(response) => return response,
+    };
 
     let priority = match parse_i64_header(&request.headers, "x-task-priority", 0) {
         Ok(value) => value,
         Err(response) => return response,
     };
-    let max_retries = match parse_i64_header(&request.headers, "x-task-max-retries", 3) {
+    let max_retries_value = match parse_i64_header(&request.headers, "x-task-max-retries", 3) {
         Ok(value) if (0..=100).contains(&value) => value,
         Ok(_) => {
             return Response::error(
@@ -328,8 +337,52 @@ async fn route_enqueue(request: Request, state: LocalApiState) -> Response {
         }
     };
 
-    let kind = TaskKind::from_db(task_type);
-    let max_retries = match MaxRetries::new(max_retries) {
+    if let Some((idempotency_key, request_fingerprint)) = idempotency {
+        let store = state.idempotency.clone();
+        let task_name_for_store = task_name.clone();
+        let task_type_for_store = task_type.clone();
+        let payload_for_store = payload.clone();
+
+        return match tokio::task::spawn_blocking(move || {
+            store.ensure_schema()?;
+            store.enqueue(
+                &idempotency_key,
+                &request_fingerprint,
+                &task_name_for_store,
+                &task_type_for_store,
+                &payload_for_store,
+                priority,
+                max_retries_value,
+            )
+        })
+        .await
+        {
+            Ok(Ok(IdempotentEnqueueResult::Created(task_id))) => Response::json(
+                202,
+                "Accepted",
+                format!(
+                    "{{\"task_id\":{task_id},\"status\":\"PENDING\",\"idempotency\":\"created\"}}"
+                ),
+            ),
+            Ok(Ok(IdempotentEnqueueResult::Replayed(task_id))) => Response::json(
+                202,
+                "Accepted",
+                format!(
+                    "{{\"task_id\":{task_id},\"status\":\"PENDING\",\"idempotency\":\"replayed\"}}"
+                ),
+            ),
+            Ok(Ok(IdempotentEnqueueResult::Conflict)) => Response::error(
+                409,
+                "Conflict",
+                "idempotency key was already used with a different request fingerprint",
+            ),
+            Ok(Err(error)) => Response::error(500, "Internal Server Error", &error.to_string()),
+            Err(error) => Response::error(500, "Internal Server Error", &error.to_string()),
+        };
+    }
+
+    let kind = TaskKind::from_db(&task_type);
+    let max_retries = match MaxRetries::new(max_retries_value) {
         Ok(value) => value,
         Err(error) => return Response::error(400, "Bad Request", &error.to_string()),
     };
@@ -385,6 +438,31 @@ fn required_header<'a>(
         .ok_or_else(|| Response::error(400, "Bad Request", &format!("missing {name} header")))
 }
 
+fn parse_idempotency_headers(
+    headers: &HashMap<String, String>,
+) -> Result<Option<(&str, &str)>, Response> {
+    match (
+        headers.get("x-idempotency-key"),
+        headers.get("x-request-fingerprint"),
+    ) {
+        (None, None) => Ok(None),
+        (Some(key), Some(fingerprint)) => {
+            validate_idempotency_key(key).map_err(|message| {
+                Response::error(400, "Bad Request", &message)
+            })?;
+            validate_request_fingerprint(fingerprint).map_err(|message| {
+                Response::error(400, "Bad Request", &message)
+            })?;
+            Ok(Some((key.as_str(), fingerprint.as_str())))
+        }
+        _ => Err(Response::error(
+            400,
+            "Bad Request",
+            "x-idempotency-key and x-request-fingerprint must be supplied together",
+        )),
+    }
+}
+
 fn parse_i64_header(
     headers: &HashMap<String, String>,
     name: &str,
@@ -415,6 +493,27 @@ fn validate_identifier(value: &str, max_len: usize, header: &str) -> Result<(), 
         ));
     }
 
+    Ok(())
+}
+
+fn validate_idempotency_key(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 128 {
+        return Err("x-idempotency-key length must be between 1 and 128".into());
+    }
+    if !value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':')
+    }) {
+        return Err(
+            "x-idempotency-key may contain only ASCII alphanumeric characters and . _ - :".into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_request_fingerprint(value: &str) -> Result<(), String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("x-request-fingerprint must be a 64-character hexadecimal SHA-256 digest".into());
+    }
     Ok(())
 }
 
@@ -577,6 +676,69 @@ mod tests {
         assert_eq!(fetched.status, 200);
         assert!(fetched.body.contains("\"task_name\":\"document.process\""));
         assert!(fetched.body.contains("\"status\":\"PENDING\""));
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn idempotent_enqueue_replays_across_state_reconstruction_and_conflicts_on_change() {
+        let db_path = std::env::temp_dir().join(format!(
+            "local_api_idempotency_{}.db",
+            rand::random::<u64>()
+        ));
+        let queue = AsyncRobustSinkhornQueue::new(&db_path);
+        queue.ensure_schema().await.unwrap();
+        let state = LocalApiState::new(queue.clone(), &db_path);
+
+        let make_request = |fingerprint: &str, payload: &[u8]| {
+            let mut enqueue = request("POST", "/v1/tasks");
+            enqueue
+                .headers
+                .insert("x-task-name".into(), "document.process".into());
+            enqueue.headers.insert("x-task-type".into(), "cpu".into());
+            enqueue
+                .headers
+                .insert("x-idempotency-key".into(), "request-123".into());
+            enqueue
+                .headers
+                .insert("x-request-fingerprint".into(), fingerprint.into());
+            enqueue.body = payload.to_vec();
+            enqueue
+        };
+
+        let fingerprint_a = "a".repeat(64);
+        let fingerprint_b = "b".repeat(64);
+
+        let created = route(
+            make_request(&fingerprint_a, br#"{"document_id":"abc"}"#),
+            state,
+        )
+        .await;
+        assert_eq!(created.status, 202);
+        assert!(created.body.contains("\"task_id\":1"));
+        assert!(created.body.contains("\"idempotency\":\"created\""));
+
+        let reconstructed = LocalApiState::new(queue, &db_path);
+        let replayed = route(
+            make_request(&fingerprint_a, br#"{"document_id":"abc"}"#),
+            reconstructed.clone(),
+        )
+        .await;
+        assert_eq!(replayed.status, 202);
+        assert!(replayed.body.contains("\"task_id\":1"));
+        assert!(replayed.body.contains("\"idempotency\":\"replayed\""));
+
+        let conflict = route(
+            make_request(&fingerprint_b, br#"{"document_id":"changed"}"#),
+            reconstructed.clone(),
+        )
+        .await;
+        assert_eq!(conflict.status, 409);
+
+        let missing_second_task = route(request("GET", "/v1/tasks/2"), reconstructed).await;
+        assert_eq!(missing_second_task.status, 404);
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
