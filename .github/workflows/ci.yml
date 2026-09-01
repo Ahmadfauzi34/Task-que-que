@@ -1,43 +1,106 @@
 name: CI
 
 on:
+  push:
+    branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
 
-permissions:
-  contents: write
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  normalize-worker-sources:
-    if: github.event.pull_request.number == 21 && github.event.pull_request.head.repo.full_name == github.repository
+  test:
+    name: Build & Test
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout PR head
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.ref }}
 
-      - name: Install canonical rustfmt
+      - name: Validate Termux installer syntax
+        run: |
+          sh -n install-termux.sh
+          sh -n gateway/install-bun-termux.sh
+          sh -n gateway/tests/termux-smoke.sh
+          sh -n gateway/tests/trycloudflare-smoke.sh
+          sh -n tests/termux-shutdown-smoke.sh
+          sh -n tests/worker-protocol-smoke.sh
+          sh -n tests/termux-worker-protocol-smoke.sh
+
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: clippy, rustfmt
 
-      - name: Apply compiler-confirmed fixes and canonical formatting
-        shell: bash
-        run: |
-          set -euo pipefail
-          sed -i 's/use rusqlite::{params, OptionalExtension, TransactionBehavior};/use rusqlite::{params, TransactionBehavior};/' src/worker_protocol.rs
-          sed -i 's/task\.name\.as_str()/task.task_name.as_str()/g; s/task\.kind\.to_db()/task.task_kind.to_db()/g' src/worker_api.rs
-          cargo fmt --all
+      - name: Check code formatting
+        run: cargo fmt --all -- --check
 
-      - name: Commit normalized Rust sources
-        shell: bash
-        run: |
-          set -euo pipefail
-          git diff --check -- src/worker_protocol.rs src/worker_api.rs src/bin/robust-sinkhorn-worker.rs
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/worker_protocol.rs src/worker_api.rs src/bin/robust-sinkhorn-worker.rs
-          git commit -m 'style: normalize worker sources and fix claim fields'
-          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+      - name: Run Clippy lints
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run unit & integration tests
+        run: cargo test --all-targets --verbose
+
+  gateway:
+    name: Bun Gateway
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: latest
+
+      - name: Show Bun version
+        run: bun --version
+
+      - name: Run gateway tests
+        working-directory: gateway
+        run: bun test
+
+      - name: Compile gateway entrypoint
+        working-directory: gateway
+        run: bun build src/server.ts --target=bun --outdir=.check-dist
+
+  gateway-integration:
+    name: Bun to Rust Integration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: latest
+
+      - name: Build Rust queue daemon
+        run: cargo build --locked --bin robust-sinkhorn-queue
+
+      - name: Run localhost protocol smoke test
+        run: bash gateway/tests/e2e.sh
+
+  worker-integration:
+    name: Worker Protocol Integration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build queue and worker binaries
+        run: cargo build --locked --bin robust-sinkhorn-queue --bin robust-sinkhorn-worker
+
+      - name: Run separated worker data-plane proof
+        run: sh tests/worker-protocol-smoke.sh
