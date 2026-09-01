@@ -1,8 +1,9 @@
 import type { AdmissionController } from "./admission";
+import type { CloudflareAccessVerifierLike } from "./cloudflare_access";
 import type { GatewayConfig } from "./config";
 import { getTaskPolicy, type TaskRegistry } from "./registry";
 
-export const GATEWAY_VERSION = "0.2.0";
+export const GATEWAY_VERSION = "0.3.0";
 export const MAX_PUBLIC_REQUEST_BYTES = 1024 * 1024;
 
 export type FetchLike = (
@@ -14,6 +15,7 @@ export interface GatewayDependencies {
   config: GatewayConfig;
   registry: TaskRegistry;
   admissionController: AdmissionController;
+  cloudflareAccessVerifier?: CloudflareAccessVerifierLike;
   fetchImpl?: FetchLike;
 }
 
@@ -22,6 +24,11 @@ interface PublicTaskRequest {
   payload: unknown;
   priority?: number;
   max_retries?: number;
+}
+
+interface AuthenticatedPrincipal {
+  source: "anonymous" | "bearer" | "cloudflare_access_service";
+  scope: string;
 }
 
 const TASK_REQUEST_KEYS = new Set(["type", "payload", "priority", "max_retries"]);
@@ -58,27 +65,66 @@ function constantTimeEqual(left: string, right: string): boolean {
   return diff === 0;
 }
 
-function isAuthorized(request: Request, config: GatewayConfig): boolean {
+async function authenticateRequest(
+  request: Request,
+  config: GatewayConfig,
+  cloudflareAccessVerifier?: CloudflareAccessVerifierLike,
+): Promise<AuthenticatedPrincipal | Response> {
   if (config.allowUnauthenticated) {
-    return true;
+    return { source: "anonymous", scope: "anonymous-local-development" };
   }
 
-  if (!config.apiToken) {
-    return false;
+  if (config.authMode === "bearer") {
+    if (!config.apiToken) {
+      return errorResponse(503, "auth_misconfigured", "gateway authentication is unavailable");
+    }
+
+    const authorization = request.headers.get("authorization");
+    if (
+      !authorization?.startsWith("Bearer ") ||
+      !constantTimeEqual(authorization.slice("Bearer ".length), config.apiToken)
+    ) {
+      return errorResponse(401, "unauthorized", "valid bearer token required");
+    }
+
+    return { source: "bearer", scope: "bearer-v1" };
   }
 
-  const authorization = request.headers.get("authorization");
-  if (!authorization?.startsWith("Bearer ")) {
-    return false;
+  const assertion = request.headers.get("cf-access-jwt-assertion");
+  if (!assertion) {
+    return errorResponse(
+      401,
+      "cloudflare_access_required",
+      "valid Cloudflare Access service assertion required",
+    );
+  }
+  if (!cloudflareAccessVerifier) {
+    return errorResponse(
+      503,
+      "identity_verifier_unavailable",
+      "Cloudflare Access verifier is unavailable",
+    );
   }
 
-  return constantTimeEqual(authorization.slice("Bearer ".length), config.apiToken);
-}
+  const verification = await cloudflareAccessVerifier.verify(assertion);
+  if (!verification.ok) {
+    return verification.reason === "unavailable"
+      ? errorResponse(
+          503,
+          "identity_provider_unavailable",
+          "Cloudflare Access signing keys are unavailable",
+        )
+      : errorResponse(
+          401,
+          "invalid_cloudflare_access_assertion",
+          "Cloudflare Access assertion is invalid",
+        );
+  }
 
-function requireAuthorization(request: Request, config: GatewayConfig): Response | null {
-  return isAuthorized(request, config)
-    ? null
-    : errorResponse(401, "unauthorized", "valid bearer token required");
+  return {
+    source: "cloudflare_access_service",
+    scope: verification.principal.scope,
+  };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -209,6 +255,24 @@ async function requestFingerprint(
   );
 }
 
+async function internalIdempotencyKey(
+  externalKey: string,
+  principal: AuthenticatedPrincipal,
+): Promise<string> {
+  if (principal.source !== "cloudflare_access_service") {
+    return externalKey;
+  }
+
+  const digest = await sha256Hex(
+    canonicalJson({
+      contract_version: 1,
+      principal_scope: principal.scope,
+      external_key: externalKey,
+    }),
+  );
+  return `cf:${digest}`;
+}
+
 async function fetchWithTimeout(
   fetchImpl: FetchLike,
   input: string,
@@ -257,10 +321,11 @@ async function handleCreateTask(
   registry: TaskRegistry,
   admissionController: AdmissionController,
   fetchImpl: FetchLike,
+  cloudflareAccessVerifier?: CloudflareAccessVerifierLike,
 ): Promise<Response> {
-  const denied = requireAuthorization(request, config);
-  if (denied) {
-    return denied;
+  const principal = await authenticateRequest(request, config, cloudflareAccessVerifier);
+  if (principal instanceof Response) {
+    return principal;
   }
 
   const idempotencyKey = parseIdempotencyKey(request);
@@ -317,6 +382,7 @@ async function handleCreateTask(
   }
 
   let fingerprint: string;
+  let privateIdempotencyKey: string;
   try {
     fingerprint = await requestFingerprint(
       parsed.type,
@@ -325,6 +391,7 @@ async function handleCreateTask(
       maxRetries,
       parsed.payload,
     );
+    privateIdempotencyKey = await internalIdempotencyKey(idempotencyKey, principal);
   } catch {
     return errorResponse(400, "invalid_payload", "payload must contain only valid JSON values");
   }
@@ -341,7 +408,7 @@ async function handleCreateTask(
           "x-task-type": policy.queueKind,
           "x-task-priority": String(priority),
           "x-task-max-retries": String(maxRetries),
-          "x-idempotency-key": idempotencyKey,
+          "x-idempotency-key": privateIdempotencyKey,
           "x-request-fingerprint": fingerprint,
         },
         body: payload,
@@ -417,10 +484,11 @@ async function handleGetTask(
   taskIdText: string,
   config: GatewayConfig,
   fetchImpl: FetchLike,
+  cloudflareAccessVerifier?: CloudflareAccessVerifierLike,
 ): Promise<Response> {
-  const denied = requireAuthorization(request, config);
-  if (denied) {
-    return denied;
+  const principal = await authenticateRequest(request, config, cloudflareAccessVerifier);
+  if (principal instanceof Response) {
+    return principal;
   }
 
   if (!/^[1-9][0-9]*$/.test(taskIdText)) {
@@ -455,7 +523,13 @@ export async function handleRequest(
   request: Request,
   dependencies: GatewayDependencies,
 ): Promise<Response> {
-  const { config, registry, admissionController, fetchImpl = fetch } = dependencies;
+  const {
+    config,
+    registry,
+    admissionController,
+    cloudflareAccessVerifier,
+    fetchImpl = fetch,
+  } = dependencies;
   const url = new URL(request.url);
   const path = url.pathname;
 
@@ -473,14 +547,21 @@ export async function handleRequest(
 
   if (path === "/v1/tasks") {
     return request.method === "POST"
-      ? handleCreateTask(request, config, registry, admissionController, fetchImpl)
+      ? handleCreateTask(
+          request,
+          config,
+          registry,
+          admissionController,
+          fetchImpl,
+          cloudflareAccessVerifier,
+        )
       : errorResponse(405, "method_not_allowed", "POST required");
   }
 
   const taskMatch = /^\/v1\/tasks\/([^/]+)$/.exec(path);
   if (taskMatch) {
     return request.method === "GET"
-      ? handleGetTask(request, taskMatch[1]!, config, fetchImpl)
+      ? handleGetTask(request, taskMatch[1]!, config, fetchImpl, cloudflareAccessVerifier)
       : errorResponse(405, "method_not_allowed", "GET required");
   }
 
