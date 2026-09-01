@@ -1,0 +1,10 @@
+{
+  "name": "@task-queue/remote-agent-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "check": "bun build src/worker.ts --target=bun --outdir=.check-dist"
+  }
+}
