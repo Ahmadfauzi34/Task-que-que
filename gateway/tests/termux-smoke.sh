@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/sh
 set -eu
 
-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+ROOT_DIR="$(CDPATH= cd "$(dirname "$0")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 RUST_PID=""
 BUN_PID=""
@@ -39,10 +39,20 @@ cleanup() {
   fi
   rm -rf "$TMP_DIR"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup 0
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
+}
+
+require_executable() {
+  if command -v "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  [ -x "$1" ] || fail "required executable not found: $1"
 }
 
 wait_for_url() {
@@ -67,8 +77,8 @@ require_command curl
 require_command grep
 require_command sed
 require_command mktemp
-require_command "$RUST_BIN"
-require_command "$BUN_BIN"
+require_executable "$RUST_BIN"
+require_executable "$BUN_BIN"
 
 ARCH="$(uname -m 2>/dev/null || true)"
 case "$ARCH" in
@@ -77,9 +87,9 @@ case "$ARCH" in
 esac
 [ -x /system/bin/linker64 ] || fail "Android 64-bit linker not found at /system/bin/linker64"
 
-RUST_VERSION="$($RUST_BIN version 2>/dev/null || true)"
+RUST_VERSION="$("$RUST_BIN" version 2>/dev/null || true)"
 [ -n "$RUST_VERSION" ] || fail "Rust queue binary could not execute"
-BUN_VERSION="$($BUN_BIN --version 2>/dev/null || true)"
+BUN_VERSION="$("$BUN_BIN" --version 2>/dev/null || true)"
 [ -n "$BUN_VERSION" ] || fail "Bun Android runtime could not execute"
 
 # Do not attach to or kill an already-running service. The smoke proof owns both ports.
