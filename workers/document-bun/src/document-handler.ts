@@ -12,6 +12,7 @@ export const documentProcessHandler: WorkerHandler = {
   async handle(task, context) {
     const result = await processDocument(task.task_id, task.payload);
     await writeDocumentResultAtomic(context.outputDir, result);
+    return result;
   },
 
   classifyError(error) {
