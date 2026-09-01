@@ -855,10 +855,8 @@ mod tests {
 
     #[tokio::test]
     async fn result_route_returns_only_completed_projection_without_fence_metadata() {
-        let db_path = std::env::temp_dir().join(format!(
-            "local_api_result_{}.db",
-            rand::random::<u64>()
-        ));
+        let db_path =
+            std::env::temp_dir().join(format!("local_api_result_{}.db", rand::random::<u64>()));
         let queue = AsyncRobustSinkhornQueue::new(&db_path);
         queue.ensure_schema().await.unwrap();
         queue
@@ -872,10 +870,7 @@ mod tests {
             .await
             .unwrap();
         DatabaseManager::execute_with_retry(&db_path, |conn| {
-            conn.execute(
-                "UPDATE tasks SET status = 'COMPLETED' WHERE id = 1",
-                [],
-            )?;
+            conn.execute("UPDATE tasks SET status = 'COMPLETED' WHERE id = 1", [])?;
             conn.execute(
                 "INSERT INTO task_results
                     (task_id, result_json, result_bytes, lease_generation, created_at)
