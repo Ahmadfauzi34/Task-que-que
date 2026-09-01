@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
-use crate::sync_queue::{DatabaseManager, QueueResult};
+use crate::sync_queue::{DatabaseManager, QueueError, QueueResult};
 
 const IDEMPOTENCY_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS task_idempotency (
@@ -22,6 +22,10 @@ pub enum IdempotentEnqueueResult {
     Created(i64),
     Replayed(i64),
     Conflict,
+    Full {
+        active_tasks: i64,
+        max_active_tasks: i64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +58,36 @@ impl IdempotencyStore {
         priority: i64,
         max_retries: i64,
     ) -> QueueResult<IdempotentEnqueueResult> {
+        self.enqueue_bounded(
+            idempotency_key,
+            request_fingerprint,
+            task_name,
+            task_type,
+            payload,
+            priority,
+            max_retries,
+            i64::MAX,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn enqueue_bounded(
+        &self,
+        idempotency_key: &str,
+        request_fingerprint: &str,
+        task_name: &str,
+        task_type: &str,
+        payload: &str,
+        priority: i64,
+        max_retries: i64,
+        max_active_tasks: i64,
+    ) -> QueueResult<IdempotentEnqueueResult> {
+        if max_active_tasks <= 0 {
+            return Err(QueueError::InvalidState(
+                "max_active_tasks must be greater than zero".into(),
+            ));
+        }
+
         let idempotency_key = idempotency_key.to_owned();
         let request_fingerprint = request_fingerprint.to_owned();
         let task_name = task_name.to_owned();
@@ -81,6 +115,22 @@ impl IdempotencyStore {
                 } else {
                     Ok(IdempotentEnqueueResult::Conflict)
                 };
+            }
+
+            let active_tasks: i64 = tx.query_row(
+                "SELECT COUNT(*)
+                 FROM tasks
+                 WHERE status IN ('PENDING', 'ASSIGNED', 'RUNNING')",
+                [],
+                |row| row.get(0),
+            )?;
+
+            if active_tasks >= max_active_tasks {
+                tx.commit()?;
+                return Ok(IdempotentEnqueueResult::Full {
+                    active_tasks,
+                    max_active_tasks,
+                });
             }
 
             tx.execute(
@@ -200,6 +250,126 @@ mod tests {
     }
 
     #[test]
+    fn replay_precedes_capacity_check_and_new_key_is_rejected_when_full() {
+        let db_path = temp_db("idempotency_capacity_replay");
+        let store = prepare(&db_path);
+
+        let created = store
+            .enqueue_bounded(
+                "request-1",
+                "fp-a",
+                "document.process",
+                "cpu",
+                "{}",
+                10,
+                3,
+                1,
+            )
+            .unwrap();
+        assert_eq!(created, IdempotentEnqueueResult::Created(1));
+
+        let replayed = store
+            .enqueue_bounded(
+                "request-1",
+                "fp-a",
+                "document.process",
+                "cpu",
+                "{}",
+                10,
+                3,
+                1,
+            )
+            .unwrap();
+        assert_eq!(replayed, IdempotentEnqueueResult::Replayed(1));
+
+        let full = store
+            .enqueue_bounded(
+                "request-2",
+                "fp-b",
+                "document.process",
+                "cpu",
+                "{}",
+                10,
+                3,
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            full,
+            IdempotentEnqueueResult::Full {
+                active_tasks: 1,
+                max_active_tasks: 1,
+            }
+        );
+
+        let conn = Connection::open(&db_path).unwrap();
+        let task_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(task_count, 1);
+
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn concurrent_distinct_keys_cannot_overshoot_active_capacity() {
+        let db_path = temp_db("idempotency_capacity_concurrent");
+        prepare(&db_path);
+
+        let workers = 8;
+        let barrier = Arc::new(Barrier::new(workers));
+        let mut handles = Vec::new();
+
+        for index in 0..workers {
+            let path = db_path.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                let store = IdempotencyStore::new(path);
+                barrier.wait();
+                store
+                    .enqueue_bounded(
+                        &format!("key-{index}"),
+                        &format!("fp-{index}"),
+                        "document.process",
+                        "cpu",
+                        "{}",
+                        0,
+                        3,
+                        1,
+                    )
+                    .unwrap()
+            }));
+        }
+
+        let results: Vec<IdempotentEnqueueResult> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, IdempotentEnqueueResult::Created(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, IdempotentEnqueueResult::Full { .. }))
+                .count(),
+            workers - 1
+        );
+
+        let conn = Connection::open(&db_path).unwrap();
+        let task_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(task_count, 1);
+
+        cleanup(&db_path);
+    }
+
+    #[test]
     fn concurrent_same_key_creates_exactly_one_task() {
         let db_path = temp_db("idempotency_concurrent");
         prepare(&db_path);
@@ -240,9 +410,10 @@ mod tests {
             1
         );
         assert!(results.iter().all(|result| match result {
-            IdempotentEnqueueResult::Created(id) | IdempotentEnqueueResult::Replayed(id) =>
-                *id == 1,
-            IdempotentEnqueueResult::Conflict => false,
+            IdempotentEnqueueResult::Created(id) | IdempotentEnqueueResult::Replayed(id) => {
+                *id == 1
+            }
+            IdempotentEnqueueResult::Conflict | IdempotentEnqueueResult::Full { .. } => false,
         }));
 
         let conn = Connection::open(&db_path).unwrap();
