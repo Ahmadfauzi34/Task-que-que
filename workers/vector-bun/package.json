@@ -1,0 +1,11 @@
+{
+  "name": "@task-que-que/reference-vector-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/worker.ts",
+    "test": "bun test",
+    "check": "bun test && bun build src/worker.ts --target=bun --outdir=.check-dist"
+  }
+}
