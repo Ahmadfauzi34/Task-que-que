@@ -16,6 +16,13 @@ export const TASK_REGISTRY: TaskRegistry = Object.freeze({
     maxPriority: 1_000,
     maxRetries: 10,
   }),
+  "hash.compute": Object.freeze({
+    queueKind: "cpu",
+    maxPayloadBytes: 256 * 1024,
+    minPriority: -1_000,
+    maxPriority: 1_000,
+    maxRetries: 10,
+  }),
 });
 
 export function getTaskPolicy(
