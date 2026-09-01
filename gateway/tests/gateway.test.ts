@@ -17,6 +17,7 @@ const config: GatewayConfig = {
   upstreamTimeoutMs: 1_000,
   enqueueRatePerSecond: 10,
   enqueueBurst: 20,
+  maxActiveTasks: 256,
 };
 
 const allowAllAdmission: AdmissionController = {
@@ -58,6 +59,7 @@ describe("gateway config", () => {
     expect(value.hostname).toBe("127.0.0.1");
     expect(value.enqueueRatePerSecond).toBe(10);
     expect(value.enqueueBurst).toBe(20);
+    expect(value.maxActiveTasks).toBe(256);
   });
 
   test("accepts bounded admission tuning and rejects invalid values", () => {
@@ -65,9 +67,11 @@ describe("gateway config", () => {
       GATEWAY_API_TOKEN: "secret",
       GATEWAY_ENQUEUE_RATE_PER_SECOND: "250",
       GATEWAY_ENQUEUE_BURST: "500",
+      GATEWAY_MAX_ACTIVE_TASKS: "700",
     });
     expect(value.enqueueRatePerSecond).toBe(250);
     expect(value.enqueueBurst).toBe(500);
+    expect(value.maxActiveTasks).toBe(700);
 
     expect(() =>
       loadGatewayConfig({
@@ -75,6 +79,13 @@ describe("gateway config", () => {
         GATEWAY_ENQUEUE_RATE_PER_SECOND: "0",
       }),
     ).toThrow("GATEWAY_ENQUEUE_RATE_PER_SECOND");
+
+    expect(() =>
+      loadGatewayConfig({
+        GATEWAY_API_TOKEN: "secret",
+        GATEWAY_MAX_ACTIVE_TASKS: "0",
+      }),
+    ).toThrow("GATEWAY_MAX_ACTIVE_TASKS");
   });
 
   test("rejects non-loopback gateway and queue addresses", () => {
@@ -255,6 +266,7 @@ describe("gateway policy boundary", () => {
     expect(headers.get("x-task-max-retries")).toBe("3");
     expect(headers.get("x-idempotency-key")).toBe("request-abc");
     expect(headers.get("x-request-fingerprint")).toMatch(/^[0-9a-f]{64}$/);
+    expect(headers.get("x-queue-max-active-tasks")).toBe("256");
     expect(capturedInit?.body).toBe('{"document_id":"abc"}');
 
     expect(await response.json()).toEqual({
@@ -328,6 +340,23 @@ describe("gateway policy boundary", () => {
     expect(await response.text()).toContain("idempotency_conflict");
   });
 
+  test("durable capacity rejection is surfaced as public 503", async () => {
+    const fetchImpl: FetchLike = async () =>
+      Response.json({ error: "active task admission capacity reached" }, { status: 503 });
+
+    const response = await handleRequest(
+      request("/v1/tasks", {
+        method: "POST",
+        headers: taskHeaders("capacity-key"),
+        body: JSON.stringify({ type: "document.process", payload: { id: 1 } }),
+      }),
+      dependencies(fetchImpl),
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.text()).toContain("queue_capacity_reached");
+  });
+
   test("rate limit rejects excess valid enqueue before Rust and returns Retry-After", async () => {
     let calls = 0;
     const fetchImpl: FetchLike = async () => {
@@ -367,10 +396,7 @@ describe("gateway policy boundary", () => {
       throw new Error("connection refused");
     };
 
-    const response = await handleRequest(
-      request("/readyz"),
-      dependencies(fetchImpl),
-    );
+    const response = await handleRequest(request("/readyz"), dependencies(fetchImpl));
 
     expect(response.status).toBe(503);
   });
