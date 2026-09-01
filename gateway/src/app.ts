@@ -403,14 +403,9 @@ function publicTaskSnapshot(value: unknown): Record<string, unknown> | null {
     "max_retries",
     "retry_count",
     "status",
-    "locked_by",
-    "locked_until",
-    "heartbeat_at",
-    "error_log",
     "scheduled_at",
     "created_at",
     "updated_at",
-    "lease_generation",
   ] as const;
 
   const snapshot: Record<string, unknown> = {};
