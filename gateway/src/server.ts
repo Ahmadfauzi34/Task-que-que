@@ -1,5 +1,6 @@
 import { TokenBucketAdmissionController } from "./admission";
 import { handleRequest, MAX_PUBLIC_REQUEST_BYTES } from "./app";
+import { CloudflareAccessServiceVerifier } from "./cloudflare_access";
 import { loadGatewayConfig } from "./config";
 import { TASK_REGISTRY } from "./registry";
 
@@ -8,6 +9,14 @@ const admissionController = new TokenBucketAdmissionController(
   config.enqueueRatePerSecond,
   config.enqueueBurst,
 );
+const cloudflareAccessVerifier =
+  config.authMode === "cloudflare_access_service"
+    ? new CloudflareAccessServiceVerifier({
+        teamDomain: config.cloudflareAccessTeamDomain!,
+        audience: config.cloudflareAccessAudience!,
+        serviceTokenClientId: config.cloudflareAccessServiceTokenClientId!,
+      })
+    : undefined;
 
 const server = Bun.serve({
   hostname: config.hostname,
@@ -19,6 +28,7 @@ const server = Bun.serve({
       config,
       registry: TASK_REGISTRY,
       admissionController,
+      cloudflareAccessVerifier,
     });
   },
   error(error) {
@@ -36,7 +46,15 @@ const server = Bun.serve({
 console.log("Task Queue Bun Gateway");
 console.log(`listen : http://${config.hostname}:${server.port}`);
 console.log(`queue  : ${config.queueDaemonOrigin}`);
-console.log(`auth   : ${config.allowUnauthenticated ? "explicitly disabled" : "bearer token required"}`);
+console.log(
+  `auth   : ${
+    config.allowUnauthenticated
+      ? "explicitly disabled"
+      : config.authMode === "bearer"
+        ? "bearer token required"
+        : "Cloudflare Access service JWT required"
+  }`,
+);
 console.log(`tasks  : ${Object.keys(TASK_REGISTRY).join(", ") || "none"}`);
 console.log(`enqueue: ${config.enqueueRatePerSecond}/s, burst ${config.enqueueBurst}`);
 console.log("status : ready");
