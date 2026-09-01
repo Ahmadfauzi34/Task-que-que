@@ -29,6 +29,8 @@ jobs:
           sh -n tests/termux-worker-protocol-smoke.sh
           bash -n tests/reference-document-worker-smoke.sh
           sh -n tests/termux-reference-document-worker-smoke.sh
+          bash -n tests/reference-remote-agent-worker-smoke.sh
+          sh -n tests/termux-remote-agent-worker-smoke.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -126,11 +128,12 @@ jobs:
       - name: Build queue and worker broker
         run: cargo build --locked --bin robust-sinkhorn-queue --bin robust-sinkhorn-worker
 
-      - name: Test and compile reference document worker
+      - name: Test and compile reference workers
         working-directory: workers/document-bun
         run: |
           bun test
           bun build src/worker.ts --target=bun --outdir=.check-dist
+          bun build ../remote-agent-bun/src/worker.ts --target=bun --outdir=../remote-agent-bun/.check-dist
 
       - name: Prove public queue to reference worker flow
         run: timeout 45s bash tests/reference-document-worker-smoke.sh
