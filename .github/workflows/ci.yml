@@ -26,6 +26,7 @@ jobs:
           sh -n gateway/tests/trycloudflare-smoke.sh
           sh -n tests/termux-shutdown-smoke.sh
           sh -n tests/worker-protocol-smoke.sh
+          sh -n tests/termux-worker-protocol-smoke.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
