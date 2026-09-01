@@ -122,6 +122,19 @@ if printf '%s' "$snapshot" | grep -F '"payload"' >/dev/null; then
   exit 1
 fi
 
+metrics="$(curl -fsS http://127.0.0.1:7331/metricsz)"
+printf '%s' "$metrics" | grep -F '"total_tasks":1' >/dev/null
+printf '%s' "$metrics" | grep -F '"pending":1' >/dev/null
+printf '%s' "$metrics" | grep -F '"runnable":1' >/dev/null
+printf '%s' "$metrics" | grep -F '"expired":0' >/dev/null
+
+for forbidden in 'document.process' '"document_id"' '"payload"' '"locked_by"' 'e2e'; do
+  if printf '%s' "$metrics" | grep -F "$forbidden" >/dev/null; then
+    echo "local metrics leaked task-specific data: $forbidden" >&2
+    exit 1
+  fi
+done
+
 if curl -fsS "http://127.0.0.1:3000/v1/tasks/2" \
   -H 'Authorization: Bearer ci-gateway-secret' >/dev/null 2>&1; then
   echo "idempotency replay unexpectedly created task 2" >&2
@@ -129,3 +142,4 @@ if curl -fsS "http://127.0.0.1:3000/v1/tasks/2" \
 fi
 
 echo "Bun -> Rust idempotent localhost integration: OK (task_id=$TASK_ID)"
+echo "Rust bounded queue metrics integration: OK"
