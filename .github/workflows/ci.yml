@@ -24,6 +24,7 @@ jobs:
           sh -n gateway/install-bun-termux.sh
           sh -n gateway/tests/termux-smoke.sh
           sh -n gateway/tests/trycloudflare-smoke.sh
+          sh -n tests/termux-shutdown-smoke.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
