@@ -121,6 +121,47 @@ Cloudflare converts successful Access authentication into a signed application J
 
 For Cloudflare mode, the public `Idempotency-Key` is combined with the verified principal scope and SHA-256 hashed before it enters the private Rust protocol. Neither the external key nor service-token Client ID is stored as the private idempotency key.
 
+## Live Termux proof harness
+
+`gateway/tests/cloudflare-live-smoke.sh` is the physical proof harness for the real Access application and tunnel. It starts an isolated Rust daemon and Bun gateway locally, then drives requests through the public hostname.
+
+Keep the Service Token Client Secret only in the Termux environment. A safe interactive setup is:
+
+```sh
+export CF_PUBLIC_ORIGIN='https://queue.example.com'
+export CF_ACCESS_CLIENT_ID='YOUR_CLIENT_ID.access'
+read -rsp 'Cloudflare Access Client Secret: ' CF_ACCESS_CLIENT_SECRET
+export CF_ACCESS_CLIENT_SECRET
+printf '\n'
+
+export GATEWAY_CF_ACCESS_TEAM_DOMAIN='https://YOUR-TEAM.cloudflareaccess.com'
+export GATEWAY_CF_ACCESS_AUD='YOUR_ACCESS_APPLICATION_AUD'
+
+TASK_QUEUE_RUST_BIN="$HOME/pr13-bin/robust-sinkhorn-queue-aarch64-linux-android" \
+TASK_QUEUE_BUN_BIN="$HOME/.local/bin/task-queue-bun" \
+sh gateway/tests/cloudflare-live-smoke.sh
+
+unset CF_ACCESS_CLIENT_SECRET
+```
+
+The script never prints the Client Secret. It proves that:
+
+- a forged `Cf-Access-Jwt-Assertion` sent directly to localhost returns `401`;
+- public requests without Access credentials are rejected;
+- a deliberately wrong Service Token secret is rejected;
+- the valid Service Token is accepted;
+- the first accepted task is `task_id=1`, proving rejected attempts never reached Rust;
+- the public path reaches Bun -> Rust -> SQLite;
+- replay with the same public `Idempotency-Key` returns the same task;
+- changed content with that key returns `409`;
+- the public task snapshot still hides payload.
+
+Expected final line:
+
+```text
+Cloudflare Access -> Termux provenance integration: OK
+```
+
 ## Proof obligations before public use
 
 The boundary is considered proven only when all of these hold on the physical Termux device:
