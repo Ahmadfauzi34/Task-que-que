@@ -37,6 +37,13 @@ export const TASK_REGISTRY: TaskRegistry = Object.freeze({
     maxPriority: 1_000,
     maxRetries: 10,
   }),
+  "workflow.run": Object.freeze({
+    queueKind: "workflow",
+    maxPayloadBytes: 256 * 1024,
+    minPriority: -1_000,
+    maxPriority: 1_000,
+    maxRetries: 10,
+  }),
 });
 
 export function getTaskPolicy(
