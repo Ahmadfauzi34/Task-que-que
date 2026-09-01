@@ -3,6 +3,7 @@ set -eu
 
 TMP_DIR="$(mktemp -d)"
 RUST_BIN="${TASK_QUEUE_RUST_BIN:-robust-sinkhorn-queue}"
+EXPECTED_RUST_SHA256="${TASK_QUEUE_RUST_SHA256:-}"
 RUST_PID=""
 CURL_PID=""
 RUST_LOG="$TMP_DIR/rust.log"
@@ -72,7 +73,17 @@ require_command grep
 require_command mktemp
 require_command dd
 require_command tr
+require_command sha256sum
 require_executable "$RUST_BIN"
+
+[ -n "$EXPECTED_RUST_SHA256" ] || fail "TASK_QUEUE_RUST_SHA256 is required so the physical proof is tied to the reviewed Android artifact"
+case "$EXPECTED_RUST_SHA256" in
+  *[!0-9a-fA-F]*|'') fail "TASK_QUEUE_RUST_SHA256 must be a hexadecimal SHA-256 digest" ;;
+esac
+[ "${#EXPECTED_RUST_SHA256}" -eq 64 ] || fail "TASK_QUEUE_RUST_SHA256 must contain exactly 64 hexadecimal characters"
+
+ACTUAL_RUST_SHA256="$(sha256sum "$RUST_BIN" | awk '{print $1}')"
+[ "$ACTUAL_RUST_SHA256" = "$EXPECTED_RUST_SHA256" ] || fail "Rust binary checksum does not match the reviewed Android artifact (expected $EXPECTED_RUST_SHA256, got $ACTUAL_RUST_SHA256)"
 
 ARCH="$(uname -m 2>/dev/null || true)"
 case "$ARCH" in
@@ -143,7 +154,9 @@ RUST_PID=""
 
 printf 'Physical Termux graceful shutdown proof\n'
 printf 'architecture                    : %s\n' "$ARCH"
+printf 'rust binary sha256              : %s\n' "$ACTUAL_RUST_SHA256"
 printf '\nProof state\n'
+printf 'reviewed Android artifact         : MATCH\n'
 printf 'accepted request tracked         : OK\n'
 printf 'SIGINT starts shutdown            : OK\n'
 printf 'new connection after SIGINT       : REJECTED\n'
