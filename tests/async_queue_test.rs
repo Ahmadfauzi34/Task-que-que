@@ -483,7 +483,10 @@ async fn test_run_with_heartbeat_cancellation_and_failure() {
         available_slots: SlotCount::new(1).unwrap(),
     };
 
-    let lease = LeaseDuration::new(Duration::from_millis(100)).unwrap();
+    // This test verifies heartbeat semantics, not sub-100ms scheduler latency.
+    // Keep enough lease headroom that CI load cannot expire the task before
+    // run_with_heartbeat gets its first opportunity to renew the lease.
+    let lease = LeaseDuration::new(Duration::from_secs(1)).unwrap();
     let epsilon = Epsilon::new(1.5).unwrap();
 
     queue
