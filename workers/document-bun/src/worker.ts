@@ -2,6 +2,8 @@ import { documentProcessHandler } from "./document-handler";
 import { hashComputeHandler } from "./hash-handler";
 import { WorkerHandlerRegistry, type RegistryTask } from "./registry";
 
+export const MAX_RESULT_PROJECTION_BYTES = 256 * 1024;
+
 export const referenceWorkerRegistry = new WorkerHandlerRegistry("cpu", [
   documentProcessHandler,
   hashComputeHandler,
@@ -153,6 +155,33 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+export function serializeResultProjection(value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("worker result projection must be a JSON object");
+  }
+
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch (error) {
+    throw new Error(
+      `worker result projection is not JSON serializable: ${error instanceof Error ? error.message : "unknown error"}`,
+    );
+  }
+  if (new TextEncoder().encode(serialized).byteLength > MAX_RESULT_PROJECTION_BYTES) {
+    throw new Error("worker result projection exceeds 256 KiB");
+  }
+
+  const roundTrip = JSON.parse(serialized) as unknown;
+  if (roundTrip === null || typeof roundTrip !== "object" || Array.isArray(roundTrip)) {
+    throw new Error("worker result projection must serialize to a JSON object");
+  }
+  return serialized;
+}
+
 async function workerRequest(
   config: WorkerConfig,
   path: string,
@@ -265,6 +294,7 @@ async function taskTransition(
   task: ClaimedTask,
   path: "/v1/task/heartbeat" | "/v1/task/complete" | "/v1/task/fail",
   errorCode?: string,
+  resultProjection?: string,
 ): Promise<void> {
   const headers: Record<string, string> = {
     ...(sessionHeaders(registration) as Record<string, string>),
@@ -274,8 +304,18 @@ async function taskTransition(
   if (errorCode !== undefined) {
     headers["X-Worker-Error-Code"] = errorCode;
   }
+  if (resultProjection !== undefined) {
+    if (path !== "/v1/task/complete") {
+      throw new Error("result projection is only valid for task completion");
+    }
+    headers["Content-Type"] = "application/json; charset=utf-8";
+  }
 
-  const response = await workerRequest(config, path, { method: "POST", headers });
+  const response = await workerRequest(config, path, {
+    method: "POST",
+    headers,
+    ...(resultProjection !== undefined ? { body: resultProjection } : {}),
+  });
   if (!response.ok) {
     throw new WorkerApiError(response.status, `${path} returned HTTP ${response.status}`);
   }
@@ -337,11 +377,13 @@ async function handleClaim(
     }
   })();
 
+  let resultProjection: string | undefined;
   try {
     if (config.processDelayMs > 0) {
       await sleep(config.processDelayMs);
     }
-    await handler.handle(task, { outputDir: config.outputDir });
+    const result = await handler.handle(task, { outputDir: config.outputDir });
+    resultProjection = serializeResultProjection(result);
   } catch (error) {
     heartbeatController.abort();
     await heartbeatLoop;
@@ -363,7 +405,14 @@ async function handleClaim(
   }
 
   try {
-    await taskTransition(config, registration, task, "/v1/task/complete");
+    await taskTransition(
+      config,
+      registration,
+      task,
+      "/v1/task/complete",
+      undefined,
+      resultProjection,
+    );
     console.log(`document worker completed task ${task.task_id}`);
   } catch (error) {
     console.error(

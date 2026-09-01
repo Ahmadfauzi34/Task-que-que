@@ -11,6 +11,7 @@ pub struct TerminalRetentionResult {
     pub pruned_tasks: i64,
     pub pruned_idempotency: i64,
     pub pruned_fences: i64,
+    pub pruned_results: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -48,12 +49,14 @@ impl TerminalRetentionStore {
                     pruned_tasks: 0,
                     pruned_idempotency: 0,
                     pruned_fences: 0,
+                    pruned_results: 0,
                 });
             }
 
             let prune_count = terminal_before - max_terminal_tasks;
             let idempotency_exists = table_exists(&tx, "task_idempotency")?;
             let fences_exist = table_exists(&tx, "task_lease_fences")?;
+            let results_exist = table_exists(&tx, "task_results")?;
 
             let pruned_idempotency = if idempotency_exists {
                 tx.execute(
@@ -74,6 +77,22 @@ impl TerminalRetentionStore {
             let pruned_fences = if fences_exist {
                 tx.execute(
                     "DELETE FROM task_lease_fences
+                     WHERE task_id IN (
+                         SELECT id
+                         FROM tasks
+                         WHERE status IN ('COMPLETED', 'FAILED')
+                         ORDER BY updated_at ASC, id ASC
+                         LIMIT ?1
+                     )",
+                    params![prune_count],
+                )? as i64
+            } else {
+                0
+            };
+
+            let pruned_results = if results_exist {
+                tx.execute(
+                    "DELETE FROM task_results
                      WHERE task_id IN (
                          SELECT id
                          FROM tasks
@@ -113,6 +132,7 @@ impl TerminalRetentionStore {
                 pruned_tasks,
                 pruned_idempotency,
                 pruned_fences,
+                pruned_results,
             })
         })
     }
@@ -150,6 +170,7 @@ mod tests {
     use super::*;
     use crate::idempotency::IdempotencyStore;
     use crate::lease_fence::LeaseFence;
+    use crate::result_projection::TaskResultStore;
     use crate::sync_queue::RobustSinkhornQueue;
 
     fn temp_db(name: &str) -> PathBuf {
@@ -179,6 +200,7 @@ mod tests {
         RobustSinkhornQueue::new(&db_path).ensure_schema().unwrap();
         IdempotencyStore::new(&db_path).ensure_schema().unwrap();
         LeaseFence::new(&db_path).ensure_schema().unwrap();
+        TaskResultStore::new(&db_path).ensure_schema().unwrap();
 
         let conn = Connection::open(&db_path).unwrap();
         insert_task(&conn, 1, "COMPLETED", 1.0);
@@ -200,6 +222,15 @@ mod tests {
                 params![id, id],
             )
             .unwrap();
+            if id == 1 || id == 3 {
+                conn.execute(
+                    "INSERT INTO task_results
+                        (task_id, result_json, result_bytes, lease_generation, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![id, format!("{{\"task_id\":{id}}}"), 13i64, id, id as f64],
+                )
+                .unwrap();
+            }
         }
         drop(conn);
 
@@ -214,6 +245,7 @@ mod tests {
                 pruned_tasks: 2,
                 pruned_idempotency: 2,
                 pruned_fences: 2,
+                pruned_results: 1,
             }
         );
 
@@ -244,12 +276,22 @@ mod tests {
             .map(Result::unwrap)
             .collect();
         assert_eq!(remaining_fences, vec![3, 4]);
+
+        let remaining_results: Vec<i64> = conn
+            .prepare("SELECT task_id FROM task_results ORDER BY task_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(remaining_results, vec![3]);
         drop(conn);
 
         let second = TerminalRetentionStore::new(&db_path)
             .prune_to_max(2)
             .unwrap();
         assert_eq!(second.pruned_tasks, 0);
+        assert_eq!(second.pruned_results, 0);
         assert_eq!(second.retained_terminal, 2);
 
         cleanup(&db_path);
@@ -271,6 +313,7 @@ mod tests {
         assert_eq!(result.pruned_tasks, 1);
         assert_eq!(result.pruned_idempotency, 0);
         assert_eq!(result.pruned_fences, 0);
+        assert_eq!(result.pruned_results, 0);
 
         let conn = Connection::open(&db_path).unwrap();
         let active_count: i64 = conn

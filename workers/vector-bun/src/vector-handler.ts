@@ -136,6 +136,7 @@ export const vectorDotHandler: WorkerHandler = {
   async handle(task, context) {
     const result = computeVectorDot(task.task_id, task.payload);
     await writeVectorResultAtomic(context.outputDir, result);
+    return result;
   },
 
   classifyError(error) {

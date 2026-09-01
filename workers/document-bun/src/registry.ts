@@ -14,7 +14,7 @@ export type WorkerFailureCode = "invalid_payload" | "processing_failed";
 export interface WorkerHandler {
   readonly taskName: string;
   readonly taskType: string;
-  handle(task: RegistryTask, context: WorkerHandlerContext): Promise<void>;
+  handle(task: RegistryTask, context: WorkerHandlerContext): Promise<unknown>;
   classifyError?(error: unknown): WorkerFailureCode;
 }
 

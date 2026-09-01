@@ -8,6 +8,7 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 use crate::idempotency::{IdempotencyStore, IdempotentEnqueueResult};
+use crate::result_projection::{TaskResultProjection, TaskResultStore};
 use crate::task_query::{QueueMetricsSnapshot, TaskQueryStore, TaskSnapshot};
 use crate::tokio_queue::AsyncRobustSinkhornQueue;
 use crate::value::{EnqueueCommand, MaxRetries, Priority, TaskKind, TaskName, TaskPayload};
@@ -22,6 +23,7 @@ pub struct LocalApiState {
     queue: AsyncRobustSinkhornQueue,
     query: TaskQueryStore,
     idempotency: IdempotencyStore,
+    results: TaskResultStore,
 }
 
 impl LocalApiState {
@@ -30,7 +32,8 @@ impl LocalApiState {
         Self {
             queue,
             query: TaskQueryStore::new(db_path.clone()),
-            idempotency: IdempotencyStore::new(db_path),
+            idempotency: IdempotencyStore::new(db_path.clone()),
+            results: TaskResultStore::new(db_path),
         }
     }
 }
@@ -280,6 +283,12 @@ async fn route(request: Request, state: LocalApiState) -> Response {
     if request.method == "POST" && request.path == "/v1/tasks" {
         return route_enqueue(request, state).await;
     }
+    if request.method == "GET"
+        && request.path.starts_with("/v1/tasks/")
+        && request.path.ends_with("/result")
+    {
+        return route_get_task_result(request.path, state).await;
+    }
     if request.method == "GET" && request.path.starts_with("/v1/tasks/") {
         return route_get_task(request.path, state).await;
     }
@@ -456,6 +465,29 @@ async fn route_get_task(path: String, state: LocalApiState) -> Response {
     match tokio::task::spawn_blocking(move || query.get_task(task_id)).await {
         Ok(Ok(Some(snapshot))) => Response::json(200, "OK", snapshot_json(&snapshot)),
         Ok(Ok(None)) => Response::error(404, "Not Found", "task not found"),
+        Ok(Err(error)) => Response::error(500, "Internal Server Error", &error.to_string()),
+        Err(error) => Response::error(500, "Internal Server Error", &error.to_string()),
+    }
+}
+
+async fn route_get_task_result(path: String, state: LocalApiState) -> Response {
+    let id_text = match path
+        .strip_prefix("/v1/tasks/")
+        .and_then(|value| value.strip_suffix("/result"))
+    {
+        Some(value) if !value.is_empty() && !value.contains('/') => value,
+        _ => return Response::error(404, "Not Found", "task result route not found"),
+    };
+
+    let task_id = match id_text.parse::<i64>() {
+        Ok(value) if value > 0 => value,
+        _ => return Response::error(400, "Bad Request", "task id must be a positive integer"),
+    };
+
+    let results = state.results.clone();
+    match tokio::task::spawn_blocking(move || results.get(task_id)).await {
+        Ok(Ok(Some(result))) => Response::json(200, "OK", result_projection_json(&result)),
+        Ok(Ok(None)) => Response::error(404, "Not Found", "task result not found"),
         Ok(Err(error)) => Response::error(500, "Internal Server Error", &error.to_string()),
         Err(error) => Response::error(500, "Internal Server Error", &error.to_string()),
     }
@@ -651,6 +683,15 @@ fn snapshot_json(snapshot: &TaskSnapshot) -> String {
     )
 }
 
+fn result_projection_json(result: &TaskResultProjection) -> String {
+    format!(
+        "{{\"task_id\":{},\"result_json\":\"{}\",\"result_bytes\":{}}}",
+        result.task_id,
+        json_escape(&result.result_json),
+        result.result_bytes,
+    )
+}
+
 fn json_option_string(value: Option<&str>) -> String {
     match value {
         Some(value) => format!("\"{}\"", json_escape(value)),
@@ -714,6 +755,8 @@ async fn write_response(stream: &mut TcpStream, response: Response) -> io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync_queue::DatabaseManager;
+    use rusqlite::params;
 
     fn request(method: &str, path: &str) -> Request {
         Request {
@@ -804,6 +847,50 @@ mod tests {
         assert!(!metrics.body.contains("document.process"));
         assert!(!metrics.body.contains("document_id"));
         assert!(!metrics.body.contains("abc"));
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn result_route_returns_only_completed_projection_without_fence_metadata() {
+        let db_path =
+            std::env::temp_dir().join(format!("local_api_result_{}.db", rand::random::<u64>()));
+        let queue = AsyncRobustSinkhornQueue::new(&db_path);
+        queue.ensure_schema().await.unwrap();
+        queue
+            .enqueue(EnqueueCommand {
+                name: TaskName::new("hash.compute"),
+                kind: TaskKind::Cpu,
+                payload: TaskPayload::new("{}"),
+                priority: Priority::new(0),
+                max_retries: MaxRetries::new(3).unwrap(),
+            })
+            .await
+            .unwrap();
+        DatabaseManager::execute_with_retry(&db_path, |conn| {
+            conn.execute("UPDATE tasks SET status = 'COMPLETED' WHERE id = 1", [])?;
+            conn.execute(
+                "INSERT INTO task_results
+                    (task_id, result_json, result_bytes, lease_generation, created_at)
+                 VALUES (1, ?1, ?2, 7, 1.0)",
+                params![r#"{"digest":"abc"}"#, 16i64],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let state = LocalApiState::new(queue, &db_path);
+        let result = route(request("GET", "/v1/tasks/1/result"), state.clone()).await;
+        assert_eq!(result.status, 200);
+        assert!(result.body.contains("\"task_id\":1"));
+        assert!(result.body.contains("\\\"digest\\\":\\\"abc\\\""));
+        assert!(result.body.contains("\"result_bytes\":16"));
+        assert!(!result.body.contains("lease_generation"));
+
+        let missing = route(request("GET", "/v1/tasks/2/result"), state).await;
+        assert_eq!(missing.status, 404);
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));

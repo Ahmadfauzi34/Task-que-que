@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::idempotency::IdempotencyStore;
 use crate::lease_fence::LeaseFence;
+use crate::result_projection::TaskResultStore;
 use crate::sync_queue::{self, RobustSinkhornQueue};
 use crate::value::{
     ClaimedTask, DispatchedTask, EnqueueCommand, Epsilon, LeaseDuration, LeaseGeneration,
@@ -14,6 +15,7 @@ pub struct AsyncRobustSinkhornQueue {
     inner: Arc<RobustSinkhornQueue>,
     lease_fence: Arc<LeaseFence>,
     idempotency: Arc<IdempotencyStore>,
+    result_projection: Arc<TaskResultStore>,
 }
 
 impl AsyncRobustSinkhornQueue {
@@ -23,7 +25,8 @@ impl AsyncRobustSinkhornQueue {
         Self {
             inner: Arc::new(RobustSinkhornQueue::new(db_path.clone())),
             lease_fence: Arc::new(LeaseFence::new(db_path.clone())),
-            idempotency: Arc::new(IdempotencyStore::new(db_path)),
+            idempotency: Arc::new(IdempotencyStore::new(db_path.clone())),
+            result_projection: Arc::new(TaskResultStore::new(db_path)),
         }
     }
 
@@ -33,7 +36,8 @@ impl AsyncRobustSinkhornQueue {
         Self {
             inner: Arc::new(queue),
             lease_fence: Arc::new(LeaseFence::new(db_path.clone())),
-            idempotency: Arc::new(IdempotencyStore::new(db_path)),
+            idempotency: Arc::new(IdempotencyStore::new(db_path.clone())),
+            result_projection: Arc::new(TaskResultStore::new(db_path)),
         }
     }
 
@@ -60,8 +64,8 @@ impl AsyncRobustSinkhornQueue {
 
         tokio::task::spawn_blocking(move || op(lease_fence))
             .await
-            .map_err(|e| {
-                sync_queue::QueueError::InvalidState(format!("spawn_blocking join error: {e}"))
+            .map_err(|error| {
+                sync_queue::QueueError::InvalidState(format!("spawn_blocking join error: {error}"))
             })?
     }
 
@@ -74,8 +78,22 @@ impl AsyncRobustSinkhornQueue {
 
         tokio::task::spawn_blocking(move || op(idempotency))
             .await
-            .map_err(|e| {
-                sync_queue::QueueError::InvalidState(format!("spawn_blocking join error: {e}"))
+            .map_err(|error| {
+                sync_queue::QueueError::InvalidState(format!("spawn_blocking join error: {error}"))
+            })?
+    }
+
+    async fn blocking_result<F, T>(&self, op: F) -> sync_queue::QueueResult<T>
+    where
+        F: FnOnce(Arc<TaskResultStore>) -> sync_queue::QueueResult<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let result_projection = self.result_projection.clone();
+
+        tokio::task::spawn_blocking(move || op(result_projection))
+            .await
+            .map_err(|error| {
+                sync_queue::QueueError::InvalidState(format!("spawn_blocking join error: {error}"))
             })?
     }
 
@@ -83,7 +101,8 @@ impl AsyncRobustSinkhornQueue {
         self.blocking(|q| q.ensure_schema()).await?;
         self.blocking_fence(|fence| fence.ensure_schema()).await?;
         self.blocking_idempotency(|store| store.ensure_schema())
-            .await
+            .await?;
+        self.blocking_result(|store| store.ensure_schema()).await
     }
 
     pub async fn enqueue(&self, cmd: EnqueueCommand) -> sync_queue::QueueResult<TaskId> {
@@ -162,6 +181,21 @@ impl AsyncRobustSinkhornQueue {
 
         self.blocking_fence(move |fence| fence.complete_task(task_id.value(), &worker, generation))
             .await
+    }
+
+    pub async fn complete_task_with_projection(
+        &self,
+        task_id: TaskId,
+        worker_id: WorkerId,
+        generation: LeaseGeneration,
+        result_json: String,
+    ) -> sync_queue::QueueResult<LeaseMutation> {
+        let worker = worker_id.into_string();
+
+        self.blocking_result(move |store| {
+            store.complete_with_projection(task_id.value(), &worker, generation, &result_json)
+        })
+        .await
     }
 
     pub async fn fail_task(

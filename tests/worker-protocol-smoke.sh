@@ -128,6 +128,22 @@ post_task_transition() {
     -H "X-Lease-Generation: $generation"
 }
 
+post_task_complete_with_result() {
+  session="$1"
+  token="$2"
+  task_id="$3"
+  generation="$4"
+  body="$5"
+  curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
+    -X POST http://127.0.0.1:7332/v1/task/complete \
+    -H "X-Worker-Session: $session" \
+    -H "X-Worker-Token: $token" \
+    -H "X-Task-Id: $task_id" \
+    -H "X-Lease-Generation: $generation" \
+    -H 'Content-Type: application/json' \
+    --data-binary "$body"
+}
+
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v grep >/dev/null 2>&1 || fail "grep is required"
 command -v sed >/dev/null 2>&1 || fail "sed is required"
@@ -153,7 +169,6 @@ WORKER_PID=$!
 wait_for_url http://127.0.0.1:7331/readyz "$QUEUE_LOG" || fail "queue daemon did not become ready"
 wait_for_url http://127.0.0.1:7332/readyz "$WORKER_LOG" || fail "worker broker did not become ready"
 
-# Boundary proof: neither data-plane nor control-plane accepts the other's routes.
 control_register_status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7331/v1/register)"
 [ "$control_register_status" = "404" ] || fail "queue control-plane unexpectedly exposed worker registration"
 worker_enqueue_status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7332/v1/tasks)"
@@ -204,8 +219,23 @@ stale_status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1
   -H 'X-Task-Id: 2' \
   -H "X-Lease-Generation: $stale_generation")"
 [ "$stale_status" = "409" ] || fail "stale lease generation was not rejected"
+
+stale_result_status="$(post_task_complete_with_result \
+  "$gpu_session" "$gpu_token" 2 "$stale_generation" '{"proof":"stale"}')"
+[ "$stale_result_status" = "409" ] || fail "stale result completion was not rejected"
+missing_result_status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:7331/v1/tasks/2/result)"
+[ "$missing_result_status" = "404" ] || fail "stale result projection was persisted"
+
 post_task_transition /v1/task/heartbeat "$gpu_session" "$gpu_token" 2 "$gpu_generation" >/dev/null || fail "valid GPU heartbeat failed"
-post_task_transition /v1/task/complete "$gpu_session" "$gpu_token" 2 "$gpu_generation" >/dev/null || fail "valid GPU completion failed"
+valid_result_status="$(post_task_complete_with_result \
+  "$gpu_session" "$gpu_token" 2 "$gpu_generation" '{"proof":"applied","task_id":2}')"
+[ "$valid_result_status" = "200" ] || fail "valid GPU result completion failed"
+gpu_result="$(curl -fsS --max-time 5 http://127.0.0.1:7331/v1/tasks/2/result)" || fail "GPU result projection query failed"
+printf '%s' "$gpu_result" | grep -F '"task_id":2' >/dev/null || fail "GPU result task id mismatch"
+printf '%s' "$gpu_result" | grep -F '\"proof\":\"applied\"' >/dev/null || fail "GPU result projection missing"
+if printf '%s' "$gpu_result" | grep -F 'lease_generation' >/dev/null; then
+  fail "result query leaked fence generation"
+fi
 
 session_heartbeat="$(post_with_session /v1/session/heartbeat "$gpu_session" "$gpu_token")" || fail "worker session heartbeat failed"
 printf '%s' "$session_heartbeat" | grep -F '"status":"alive"' >/dev/null || fail "worker session heartbeat response malformed"
@@ -221,7 +251,9 @@ printf '%s' "$cpu_claim" | grep -F '"task_id":1' >/dev/null || fail "CPU worker 
 printf '%s' "$cpu_claim" | grep -F '"payload":"cpu-secret"' >/dev/null || fail "CPU payload was not delivered after claim"
 cpu_generation="$(json_number lease_generation "$cpu_claim")"
 post_task_transition /v1/task/heartbeat "$cpu_session" "$cpu_token" 1 "$cpu_generation" >/dev/null || fail "valid CPU heartbeat failed"
-post_task_transition /v1/task/complete "$cpu_session" "$cpu_token" 1 "$cpu_generation" >/dev/null || fail "valid CPU completion failed"
+post_task_transition /v1/task/complete "$cpu_session" "$cpu_token" 1 "$cpu_generation" >/dev/null || fail "legacy empty-body CPU completion failed"
+cpu_result_status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:7331/v1/tasks/1/result)"
+[ "$cpu_result_status" = "404" ] || fail "empty-body completion unexpectedly created a result"
 
 final_cpu="$(curl -fsS --max-time 5 http://127.0.0.1:7331/v1/tasks/1)" || fail "final CPU snapshot failed"
 final_gpu="$(curl -fsS --max-time 5 http://127.0.0.1:7331/v1/tasks/2)" || fail "final GPU snapshot failed"
@@ -236,6 +268,9 @@ printf 'hard capability cpu/gpu           : OK\n'
 printf 'Sinkhorn within capability        : OK\n'
 printf 'payload only after fenced claim   : OK\n'
 printf 'stale lease generation            : REJECTED\n'
+printf 'stale result projection           : REJECTED\n'
+printf 'fenced result projection          : OK\n'
+printf 'empty completion compatibility    : OK\n'
 printf 'task heartbeat                    : OK\n'
 printf 'session heartbeat                 : OK\n'
 printf 'fenced completion                 : OK\n'
