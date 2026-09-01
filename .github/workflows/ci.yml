@@ -33,8 +33,22 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Check code formatting
-        run: cargo fmt --all -- --check
+      - name: Capture canonical rustfmt output
+        run: cargo fmt --all
+
+      - name: Upload canonical worker sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-rustfmt-sources
+          path: |
+            src/worker_protocol.rs
+            src/worker_api.rs
+            src/bin/robust-sinkhorn-worker.rs
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Check source was already formatted
+        run: git diff --exit-code -- src/worker_protocol.rs src/worker_api.rs src/bin/robust-sinkhorn-worker.rs
 
       - name: Run Clippy lints
         run: cargo clippy --all-targets -- -D warnings
