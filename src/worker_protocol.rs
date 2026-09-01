@@ -342,7 +342,7 @@ fn dispatch_registered(
             let m = workers.len();
             let mut cost = Array2::<f64>::zeros((n, m));
             for (i, task) in tasks.iter().enumerate() {
-                let age = (now - task.created_at).max(0.0).min(300.0);
+                let age = (now - task.created_at).clamp(0.0, 300.0);
                 let age_bonus = age * 0.15;
                 let priority_bonus = task.priority as f64 * 1.8;
                 let base_cost = (30.0 - priority_bonus - age_bonus).max(0.5);
