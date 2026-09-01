@@ -343,6 +343,7 @@ async function handleCreateTask(
           "x-task-max-retries": String(maxRetries),
           "x-idempotency-key": idempotencyKey,
           "x-request-fingerprint": fingerprint,
+          "x-queue-max-active-tasks": String(config.maxActiveTasks),
         },
         body: payload,
       },
@@ -354,6 +355,13 @@ async function handleCreateTask(
         409,
         "idempotency_conflict",
         "Idempotency-Key was already used for a different task request",
+      );
+    }
+    if (upstream.status === 503) {
+      return errorResponse(
+        503,
+        "queue_capacity_reached",
+        "queue active-task capacity reached; retry later with the same Idempotency-Key",
       );
     }
     if (upstream.status !== 202) {
