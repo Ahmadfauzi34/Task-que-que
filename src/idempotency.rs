@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
@@ -134,6 +134,7 @@ fn now_f64() -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::{Arc, Barrier};
     use std::thread;
 
