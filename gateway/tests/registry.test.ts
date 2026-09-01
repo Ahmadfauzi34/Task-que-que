@@ -28,6 +28,13 @@ describe("public task registry", () => {
     });
   });
 
+  test("maps workflow run to a dedicated orchestration capability", () => {
+    expect(getTaskPolicy(TASK_REGISTRY, "workflow.run")).toMatchObject({
+      queueKind: "workflow",
+      maxPayloadBytes: 256 * 1024,
+    });
+  });
+
   test("keeps prototype-looking and executor-like names outside the public allowlist", () => {
     expect(getTaskPolicy(TASK_REGISTRY, "constructor")).toBeNull();
     expect(getTaskPolicy(TASK_REGISTRY, "toString")).toBeNull();
@@ -35,5 +42,7 @@ describe("public task registry", () => {
     expect(getTaskPolicy(TASK_REGISTRY, "vector.exec")).toBeNull();
     expect(getTaskPolicy(TASK_REGISTRY, "agent.exec")).toBeNull();
     expect(getTaskPolicy(TASK_REGISTRY, "agent.url")).toBeNull();
+    expect(getTaskPolicy(TASK_REGISTRY, "workflow.exec")).toBeNull();
+    expect(getTaskPolicy(TASK_REGISTRY, "workflow.shell")).toBeNull();
   });
 });
