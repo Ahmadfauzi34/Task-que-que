@@ -15,6 +15,7 @@ use crate::value::{EnqueueCommand, MaxRetries, Priority, TaskKind, TaskName, Tas
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_ACTIVE_TASK_POLICY_LIMIT: i64 = 1_000_000;
 
 #[derive(Clone)]
 pub struct LocalApiState {
@@ -325,6 +326,19 @@ async fn route_enqueue(request: Request, state: LocalApiState) -> Response {
         Ok(value) => value.map(|(key, fingerprint)| (key.to_owned(), fingerprint.to_owned())),
         Err(response) => return response,
     };
+    let max_active_tasks = if idempotency.is_some() {
+        match parse_required_bounded_i64_header(
+            &request.headers,
+            "x-queue-max-active-tasks",
+            1,
+            MAX_ACTIVE_TASK_POLICY_LIMIT,
+        ) {
+            Ok(value) => Some(value),
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
 
     let priority = match parse_i64_header(&request.headers, "x-task-priority", 0) {
         Ok(value) => value,
@@ -354,10 +368,11 @@ async fn route_enqueue(request: Request, state: LocalApiState) -> Response {
         let task_name_for_store = task_name.clone();
         let task_type_for_store = task_type.clone();
         let payload_for_store = payload.clone();
+        let max_active_tasks = max_active_tasks.expect("bounded policy exists for idempotent request");
 
         return match tokio::task::spawn_blocking(move || {
             store.ensure_schema()?;
-            store.enqueue(
+            store.enqueue_bounded(
                 &idempotency_key,
                 &request_fingerprint,
                 &task_name_for_store,
@@ -365,6 +380,7 @@ async fn route_enqueue(request: Request, state: LocalApiState) -> Response {
                 &payload_for_store,
                 priority,
                 max_retries_value,
+                max_active_tasks,
             )
         })
         .await
@@ -387,6 +403,11 @@ async fn route_enqueue(request: Request, state: LocalApiState) -> Response {
                 409,
                 "Conflict",
                 "idempotency key was already used with a different request fingerprint",
+            ),
+            Ok(Ok(IdempotentEnqueueResult::Full { .. })) => Response::error(
+                503,
+                "Service Unavailable",
+                "active task admission capacity reached",
             ),
             Ok(Err(error)) => Response::error(500, "Internal Server Error", &error.to_string()),
             Err(error) => Response::error(500, "Internal Server Error", &error.to_string()),
@@ -469,6 +490,23 @@ fn parse_idempotency_headers(
             400,
             "Bad Request",
             "x-idempotency-key and x-request-fingerprint must be supplied together",
+        )),
+    }
+}
+
+fn parse_required_bounded_i64_header(
+    headers: &HashMap<String, String>,
+    name: &str,
+    min: i64,
+    max: i64,
+) -> Result<i64, Response> {
+    let raw = required_header(headers, name)?;
+    match raw.parse::<i64>() {
+        Ok(value) if (min..=max).contains(&value) => Ok(value),
+        _ => Err(Response::error(
+            400,
+            "Bad Request",
+            &format!("{name} must be an integer between {min} and {max}"),
         )),
     }
 }
@@ -685,6 +723,26 @@ mod tests {
         }
     }
 
+    fn idempotent_request(key: &str, fingerprint: &str, payload: &[u8], max_active: i64) -> Request {
+        let mut enqueue = request("POST", "/v1/tasks");
+        enqueue
+            .headers
+            .insert("x-task-name".into(), "document.process".into());
+        enqueue.headers.insert("x-task-type".into(), "cpu".into());
+        enqueue
+            .headers
+            .insert("x-idempotency-key".into(), key.into());
+        enqueue
+            .headers
+            .insert("x-request-fingerprint".into(), fingerprint.into());
+        enqueue.headers.insert(
+            "x-queue-max-active-tasks".into(),
+            max_active.to_string(),
+        );
+        enqueue.body = payload.to_vec();
+        enqueue
+    }
+
     #[test]
     fn parses_http_head_case_insensitively() {
         let (_, path, headers) = parse_head(
@@ -757,27 +815,16 @@ mod tests {
         queue.ensure_schema().await.unwrap();
         let state = LocalApiState::new(queue.clone(), &db_path);
 
-        let make_request = |fingerprint: &str, payload: &[u8]| {
-            let mut enqueue = request("POST", "/v1/tasks");
-            enqueue
-                .headers
-                .insert("x-task-name".into(), "document.process".into());
-            enqueue.headers.insert("x-task-type".into(), "cpu".into());
-            enqueue
-                .headers
-                .insert("x-idempotency-key".into(), "request-123".into());
-            enqueue
-                .headers
-                .insert("x-request-fingerprint".into(), fingerprint.into());
-            enqueue.body = payload.to_vec();
-            enqueue
-        };
-
         let fingerprint_a = "a".repeat(64);
         let fingerprint_b = "b".repeat(64);
 
         let created = route(
-            make_request(&fingerprint_a, br#"{"document_id":"abc"}"#),
+            idempotent_request(
+                "request-123",
+                &fingerprint_a,
+                br#"{"document_id":"abc"}"#,
+                1,
+            ),
             state,
         )
         .await;
@@ -787,7 +834,12 @@ mod tests {
 
         let reconstructed = LocalApiState::new(queue, &db_path);
         let replayed = route(
-            make_request(&fingerprint_a, br#"{"document_id":"abc"}"#),
+            idempotent_request(
+                "request-123",
+                &fingerprint_a,
+                br#"{"document_id":"abc"}"#,
+                1,
+            ),
             reconstructed.clone(),
         )
         .await;
@@ -796,11 +848,29 @@ mod tests {
         assert!(replayed.body.contains("\"idempotency\":\"replayed\""));
 
         let conflict = route(
-            make_request(&fingerprint_b, br#"{"document_id":"changed"}"#),
+            idempotent_request(
+                "request-123",
+                &fingerprint_b,
+                br#"{"document_id":"changed"}"#,
+                1,
+            ),
             reconstructed.clone(),
         )
         .await;
         assert_eq!(conflict.status, 409);
+
+        let full = route(
+            idempotent_request(
+                "request-456",
+                &fingerprint_b,
+                br#"{"document_id":"second"}"#,
+                1,
+            ),
+            reconstructed.clone(),
+        )
+        .await;
+        assert_eq!(full.status, 503);
+        assert!(full.body.contains("active task admission capacity reached"));
 
         let missing_second_task = route(request("GET", "/v1/tasks/2"), reconstructed).await;
         assert_eq!(missing_second_task.status, 404);
@@ -808,6 +878,25 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn idempotent_enqueue_requires_internal_capacity_policy() {
+        let db_path = std::env::temp_dir().join(format!(
+            "local_api_capacity_header_{}.db",
+            rand::random::<u64>()
+        ));
+        let queue = AsyncRobustSinkhornQueue::new(&db_path);
+        queue.ensure_schema().await.unwrap();
+        let state = LocalApiState::new(queue, &db_path);
+
+        let mut enqueue = idempotent_request("request-1", &"a".repeat(64), b"{}", 1);
+        enqueue.headers.remove("x-queue-max-active-tasks");
+        let response = route(enqueue, state).await;
+        assert_eq!(response.status, 400);
+        assert!(response.body.contains("missing x-queue-max-active-tasks"));
+
+        let _ = std::fs::remove_file(&db_path);
     }
 
     #[tokio::test]
