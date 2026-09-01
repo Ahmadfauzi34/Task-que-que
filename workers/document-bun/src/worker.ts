@@ -1,7 +1,11 @@
 import { documentProcessHandler } from "./document-handler";
+import { hashComputeHandler } from "./hash-handler";
 import { WorkerHandlerRegistry, type RegistryTask } from "./registry";
 
-export const referenceWorkerRegistry = new WorkerHandlerRegistry("cpu", [documentProcessHandler]);
+export const referenceWorkerRegistry = new WorkerHandlerRegistry("cpu", [
+  documentProcessHandler,
+  hashComputeHandler,
+]);
 
 export interface WorkerConfig {
   origin: string;

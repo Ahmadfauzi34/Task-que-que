@@ -197,3 +197,53 @@ echo "invalid payload                   : FAILED CLOSED"
 echo "fenced completion                 : OK"
 echo
 echo "Reference document worker integration: OK (task_id=$TASK_ID)"
+
+HASH_DATA='hash me from reference worker'
+HASH_BODY='{"type":"hash.compute","payload":{"data":"hash me from reference worker","algorithm":"sha256"},"priority":10,"max_retries":0}'
+hash_created="$(curl -fsS --max-time 5 -X POST http://127.0.0.1:3000/v1/tasks \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: reference-hash-proof-1' \
+  --data-binary "$HASH_BODY")" || fail "public hash enqueue failed"
+HASH_ID="$(printf '%s' "$hash_created" | sed -n 's/.*"task_id":\([0-9][0-9]*\).*/\1/p')"
+[[ -n "$HASH_ID" ]] || fail "public hash enqueue did not return task id"
+
+hash_snapshot="$(wait_for_task_status "$HASH_ID" COMPLETED)" || fail "valid hash task did not complete"
+if printf '%s' "$hash_snapshot" | grep -E 'payload|locked_by|lease_generation|session' >/dev/null; then
+  fail "public hash snapshot leaked worker or payload internals"
+fi
+
+HASH_RESULT_FILE="$TMP_DIR/results/task-$HASH_ID.json"
+[[ -f "$HASH_RESULT_FILE" ]] || fail "hash result artifact was not created"
+EXPECTED_HASH="$(printf '%s' "$HASH_DATA" | sha256sum | awk '{print $1}')"
+grep -F '"schema_version":1' "$HASH_RESULT_FILE" >/dev/null || fail "hash result schema version missing"
+grep -F "\"task_id\":$HASH_ID" "$HASH_RESULT_FILE" >/dev/null || fail "hash result task id mismatch"
+grep -F '"algorithm":"sha256"' "$HASH_RESULT_FILE" >/dev/null || fail "hash algorithm mismatch"
+grep -F '"bytes":29' "$HASH_RESULT_FILE" >/dev/null || fail "hash byte count mismatch"
+grep -F "\"digest\":\"$EXPECTED_HASH\"" "$HASH_RESULT_FILE" >/dev/null || fail "hash digest mismatch"
+if grep -F "$HASH_DATA" "$HASH_RESULT_FILE" >/dev/null; then
+  fail "hash result artifact copied source data"
+fi
+
+INVALID_HASH_BODY='{"type":"hash.compute","payload":{"data":"no-md5","algorithm":"md5"},"priority":10,"max_retries":0}'
+invalid_hash_created="$(curl -fsS --max-time 5 -X POST http://127.0.0.1:3000/v1/tasks \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: reference-hash-proof-2' \
+  --data-binary "$INVALID_HASH_BODY")" || fail "invalid hash enqueue failed"
+INVALID_HASH_ID="$(printf '%s' "$invalid_hash_created" | sed -n 's/.*"task_id":\([0-9][0-9]*\).*/\1/p')"
+[[ -n "$INVALID_HASH_ID" ]] || fail "invalid hash task id missing"
+wait_for_task_status "$INVALID_HASH_ID" FAILED >/dev/null || fail "invalid hash algorithm did not fail closed"
+[[ ! -e "$TMP_DIR/results/task-$INVALID_HASH_ID.json" ]] || fail "invalid hash task unexpectedly produced an artifact"
+
+echo
+echo "Multi-handler worker proof state"
+echo "public enqueue -> hash.compute     : OK"
+echo "same Rust hard capability cpu      : OK"
+echo "exact registry dispatch            : OK"
+echo "sha256 allowlist                   : OK"
+echo "source data not copied to result   : OK"
+echo "unsupported md5                    : FAILED CLOSED"
+echo "document.process regression        : OK"
+echo
+echo "Reference multi-handler worker integration: OK (document=$TASK_ID hash=$HASH_ID)"
