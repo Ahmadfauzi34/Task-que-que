@@ -66,6 +66,7 @@ impl TaskResultStore {
 
         let worker_id = worker_id.to_owned();
         let result_json = result_json.to_owned();
+        let result_bytes = result_json.len() as i64;
 
         DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
             let now = now_f64();
@@ -98,8 +99,8 @@ impl TaskResultStore {
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
                         task_id,
-                        result_json,
-                        result_json.len() as i64,
+                        result_json.as_str(),
+                        result_bytes,
                         generation.value(),
                         now
                     ],
