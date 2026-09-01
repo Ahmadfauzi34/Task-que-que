@@ -23,6 +23,13 @@ export const TASK_REGISTRY: TaskRegistry = Object.freeze({
     maxPriority: 1_000,
     maxRetries: 10,
   }),
+  "vector.dot": Object.freeze({
+    queueKind: "vector",
+    maxPayloadBytes: 256 * 1024,
+    minPriority: -1_000,
+    maxPriority: 1_000,
+    maxRetries: 10,
+  }),
 });
 
 export function getTaskPolicy(
