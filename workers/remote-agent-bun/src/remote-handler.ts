@@ -103,7 +103,10 @@ export function parseRemoteAgentInvocation(raw: string): RemoteAgentInvocation {
   if (!Object.prototype.hasOwnProperty.call(value, "input")) {
     throw new RemoteAgentPayloadError("payload.input is required");
   }
-  if (value.request_id !== undefined && (typeof value.request_id !== "string" || !SAFE_ID.test(value.request_id))) {
+  if (
+    value.request_id !== undefined &&
+    (typeof value.request_id !== "string" || !SAFE_ID.test(value.request_id))
+  ) {
     throw new RemoteAgentPayloadError("payload.request_id must be a safe 1-128 character identifier");
   }
 
@@ -201,9 +204,8 @@ export async function invokeRemoteAgent(
     headers.Authorization = `Bearer ${config.bearerToken}`;
   }
 
-  let response: Response;
   try {
-    response = await fetch(config.endpoint, {
+    const response = await fetch(config.endpoint, {
       method: "POST",
       redirect: "error",
       headers,
@@ -215,27 +217,30 @@ export async function invokeRemoteAgent(
       }),
       signal: controller.signal,
     });
+
+    if (!response.ok) {
+      throw new RemoteAgentCallError(`remote agent returned HTTP ${response.status}`);
+    }
+
+    const remote = await readBoundedJson(response);
+    return {
+      schema_version: 1,
+      task_id: taskId,
+      provider_id: config.providerId,
+      ...(invocation.request_id !== undefined ? { request_id: invocation.request_id } : {}),
+      result: remote.result,
+      ...(remote.meta !== undefined ? { meta: remote.meta as Record<string, unknown> } : {}),
+    };
   } catch (error) {
+    if (error instanceof RemoteAgentCallError) {
+      throw error;
+    }
     throw new RemoteAgentCallError(
       `remote agent request failed: ${error instanceof Error ? error.message : "unknown error"}`,
     );
   } finally {
     clearTimeout(timer);
   }
-
-  if (!response.ok) {
-    throw new RemoteAgentCallError(`remote agent returned HTTP ${response.status}`);
-  }
-
-  const remote = await readBoundedJson(response);
-  return {
-    schema_version: 1,
-    task_id: taskId,
-    provider_id: config.providerId,
-    ...(invocation.request_id !== undefined ? { request_id: invocation.request_id } : {}),
-    result: remote.result,
-    ...(remote.meta !== undefined ? { meta: remote.meta as Record<string, unknown> } : {}),
-  };
 }
 
 export async function writeRemoteAgentResultAtomic(
