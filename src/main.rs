@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use robust_sinkhorn_queue::local_api::{serve_connection, LocalApiState};
+use robust_sinkhorn_queue::retention::TerminalRetentionStore;
 use robust_sinkhorn_queue::runtime::{run_dispatcher_loop, spawn_worker_slots};
 use robust_sinkhorn_queue::tokio_queue::AsyncRobustSinkhornQueue;
 use robust_sinkhorn_queue::value::{
@@ -20,6 +21,7 @@ use tokio::time::MissedTickBehavior;
 const DEFAULT_DB_PATH: &str = "queue.db";
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:7331";
 const DEFAULT_MAINTENANCE_INTERVAL_MS: u64 = 2_000;
+const DEFAULT_TERMINAL_RETENTION_MAX: i64 = 1_024;
 
 type ConnectionResult = (SocketAddr, std::io::Result<()>);
 
@@ -31,6 +33,7 @@ enum Command {
         db_path: PathBuf,
         listen_addr: SocketAddr,
         maintenance_interval: Duration,
+        terminal_retention_max: i64,
     },
     Doctor {
         db_path: PathBuf,
@@ -71,7 +74,16 @@ async fn execute(command: Command) -> QueueResult<()> {
             db_path,
             listen_addr,
             maintenance_interval,
-        } => run_serve(db_path, listen_addr, maintenance_interval).await,
+            terminal_retention_max,
+        } => {
+            run_serve(
+                db_path,
+                listen_addr,
+                maintenance_interval,
+                terminal_retention_max,
+            )
+            .await
+        }
         Command::Doctor { db_path } => run_doctor(db_path).await,
         Command::Demo { db_path } => run_demo(db_path).await,
     }
@@ -144,6 +156,7 @@ fn parse_serve_options(args: &[String]) -> Result<Command, String> {
     let mut db_path = PathBuf::from(DEFAULT_DB_PATH);
     let mut listen_addr = parse_loopback_addr(DEFAULT_LISTEN_ADDR)?;
     let mut maintenance_interval = Duration::from_millis(DEFAULT_MAINTENANCE_INTERVAL_MS);
+    let mut terminal_retention_max = DEFAULT_TERMINAL_RETENTION_MAX;
     let mut index = 0;
 
     while index < args.len() {
@@ -175,6 +188,18 @@ fn parse_serve_options(args: &[String]) -> Result<Command, String> {
                 maintenance_interval = Duration::from_millis(millis);
                 index += 2;
             }
+            "--terminal-retention-max" => {
+                let value = args.get(index + 1).ok_or_else(|| {
+                    "--terminal-retention-max requires a positive integer".to_string()
+                })?;
+                terminal_retention_max = value.parse::<i64>().map_err(|_| {
+                    "--terminal-retention-max must be a positive integer".to_string()
+                })?;
+                if terminal_retention_max <= 0 {
+                    return Err("--terminal-retention-max must be greater than zero".into());
+                }
+                index += 2;
+            }
             unknown => {
                 return Err(format!("unknown option '{unknown}' for command 'serve'"));
             }
@@ -185,6 +210,7 @@ fn parse_serve_options(args: &[String]) -> Result<Command, String> {
         db_path,
         listen_addr,
         maintenance_interval,
+        terminal_retention_max,
     })
 }
 
@@ -242,9 +268,11 @@ async fn run_serve(
     db_path: PathBuf,
     listen_addr: SocketAddr,
     maintenance_interval: Duration,
+    terminal_retention_max: i64,
 ) -> QueueResult<()> {
     let queue = AsyncRobustSinkhornQueue::new(&db_path);
     queue.ensure_schema().await?;
+    let retention = TerminalRetentionStore::new(&db_path);
 
     let listener = TcpListener::bind(listen_addr).await.map_err(|error| {
         QueueError::InvalidState(format!(
@@ -260,6 +288,7 @@ async fn run_serve(
         "maintenance interval : {} ms",
         maintenance_interval.as_millis()
     );
+    println!("terminal retention   : {terminal_retention_max} tasks");
     println!("network API          : http://{listen_addr} (loopback only)");
     println!("health               : http://{listen_addr}/healthz");
     println!("readiness            : http://{listen_addr}/readyz");
@@ -285,6 +314,17 @@ async fn run_serve(
                 let recovered = queue.recover_expired_leases().await?;
                 if recovered > 0 {
                     println!("recovered expired leases: {recovered}");
+                }
+
+                let pruned = retention.prune_to_max_async(terminal_retention_max).await?;
+                if pruned.pruned_tasks > 0 {
+                    println!(
+                        "pruned terminal tasks: {} (retained: {}, idempotency: {}, fences: {})",
+                        pruned.pruned_tasks,
+                        pruned.retained_terminal,
+                        pruned.pruned_idempotency,
+                        pruned.pruned_fences
+                    );
                 }
             }
             joined = connections.join_next(), if !connections.is_empty() => {
@@ -405,9 +445,9 @@ fn print_help() {
         "robust-sinkhorn-queue {version}\n\n\
 Usage:\n  robust-sinkhorn-queue <command> [options]\n\n\
 Commands:\n  serve    Run queue maintenance + localhost-only HTTP API\n  doctor   Validate runtime + database access and ensure the schema\n  demo     Run the isolated built-in queue/worker demonstration\n  version  Print the binary version\n  help     Print this help\n\n\
-Serve options:\n  --db <path>                         Database path (default: queue.db)\n  --listen <loopback-ip:port>         Local API address (default: 127.0.0.1:7331)\n  --maintenance-interval-ms <number>  Maintenance cadence (default: 2000)\n\n\
+Serve options:\n  --db <path>                         Database path (default: queue.db)\n  --listen <loopback-ip:port>         Local API address (default: 127.0.0.1:7331)\n  --maintenance-interval-ms <number>  Maintenance cadence (default: 2000)\n  --terminal-retention-max <number>   Retained COMPLETED/FAILED tasks (default: 1024)\n\n\
 Local API:\n  GET  /healthz\n  GET  /readyz\n  POST /v1/tasks       metadata in X-Task-* headers; body is opaque UTF-8 payload\n  GET  /v1/tasks/<id>\n\n\
-Examples:\n  robust-sinkhorn-queue doctor --db ~/.task-queue/queue.db\n  robust-sinkhorn-queue serve --db ~/.task-queue/queue.db\n  robust-sinkhorn-queue serve --db ~/.task-queue/queue.db --listen 127.0.0.1:7331\n  robust-sinkhorn-queue demo --db ./demo.db",
+Examples:\n  robust-sinkhorn-queue doctor --db ~/.task-queue/queue.db\n  robust-sinkhorn-queue serve --db ~/.task-queue/queue.db\n  robust-sinkhorn-queue serve --db ~/.task-queue/queue.db --listen 127.0.0.1:7331\n  robust-sinkhorn-queue serve --db ~/.task-queue/queue.db --terminal-retention-max 4096\n  robust-sinkhorn-queue demo --db ./demo.db",
         version = env!("CARGO_PKG_VERSION")
     );
 }
@@ -435,6 +475,7 @@ mod tests {
                 db_path: PathBuf::from(DEFAULT_DB_PATH),
                 listen_addr: default_addr(),
                 maintenance_interval: Duration::from_millis(DEFAULT_MAINTENANCE_INTERVAL_MS),
+                terminal_retention_max: DEFAULT_TERMINAL_RETENTION_MAX,
             }
         );
     }
@@ -450,12 +491,15 @@ mod tests {
                 "127.0.0.1:7444",
                 "--maintenance-interval-ms",
                 "750",
+                "--terminal-retention-max",
+                "64",
             ])
             .unwrap(),
             Command::Serve {
                 db_path: PathBuf::from("/tmp/custom.db"),
                 listen_addr: "127.0.0.1:7444".parse().unwrap(),
                 maintenance_interval: Duration::from_millis(750),
+                terminal_retention_max: 64,
             }
         );
     }
@@ -490,6 +534,8 @@ mod tests {
         assert!(parse_command(["unknown"]).is_err());
         assert!(parse_command(["serve", "--maintenance-interval-ms", "0"]).is_err());
         assert!(parse_command(["serve", "--maintenance-interval-ms", "abc"]).is_err());
+        assert!(parse_command(["serve", "--terminal-retention-max", "0"]).is_err());
+        assert!(parse_command(["serve", "--terminal-retention-max", "abc"]).is_err());
         assert!(parse_command(["doctor", "--unknown"]).is_err());
         assert!(parse_command(["version", "extra"]).is_err());
     }
