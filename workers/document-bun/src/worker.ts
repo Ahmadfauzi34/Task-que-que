@@ -1,11 +1,7 @@
-import {
-  DocumentPayloadError,
-  processDocument,
-  writeDocumentResultAtomic,
-} from "./processor";
+import { documentProcessHandler } from "./document-handler";
+import { WorkerHandlerRegistry, type RegistryTask } from "./registry";
 
-const WORKER_TASK_NAME = "document.process";
-const WORKER_KIND = "cpu";
+export const referenceWorkerRegistry = new WorkerHandlerRegistry("cpu", [documentProcessHandler]);
 
 export interface WorkerConfig {
   origin: string;
@@ -27,11 +23,7 @@ interface Registration {
   task_lease_ms: number;
 }
 
-interface ClaimedTask {
-  task_id: number;
-  task_name: string;
-  task_type: string;
-  payload: string;
+interface ClaimedTask extends RegistryTask {
   retry_count: number;
   max_retries: number;
   lease_generation: number;
@@ -192,12 +184,15 @@ function sessionHeaders(registration: Registration): HeadersInit {
   };
 }
 
-async function register(config: WorkerConfig): Promise<Registration> {
+async function register(
+  config: WorkerConfig,
+  registry: WorkerHandlerRegistry,
+): Promise<Registration> {
   const response = await workerRequest(config, "/v1/register", {
     method: "POST",
     headers: {
       "X-Worker-Id": config.workerId,
-      "X-Worker-Type": WORKER_KIND,
+      "X-Worker-Type": registry.workerType,
       "X-Worker-Capacity": String(config.capacity),
     },
   });
@@ -205,7 +200,7 @@ async function register(config: WorkerConfig): Promise<Registration> {
 
   if (
     registration.worker_id !== config.workerId ||
-    registration.worker_type !== WORKER_KIND ||
+    registration.worker_type !== registry.workerType ||
     !/^[0-9a-f]{32}$/i.test(registration.session_id) ||
     !/^[0-9a-f]{64}$/i.test(registration.session_token) ||
     !Number.isSafeInteger(registration.session_ttl_ms) ||
@@ -301,8 +296,10 @@ async function handleClaim(
   config: WorkerConfig,
   registration: Registration,
   task: ClaimedTask,
+  registry: WorkerHandlerRegistry,
 ): Promise<void> {
-  if (task.task_name !== WORKER_TASK_NAME || task.task_type !== WORKER_KIND) {
+  const handler = registry.resolve(task.task_name, task.task_type);
+  if (handler === undefined) {
     await failClaim(config, registration, task, "unsupported_task");
     return;
   }
@@ -340,14 +337,17 @@ async function handleClaim(
     if (config.processDelayMs > 0) {
       await sleep(config.processDelayMs);
     }
-    const result = await processDocument(task.task_id, task.payload);
-    await writeDocumentResultAtomic(config.outputDir, result);
+    await handler.handle(task, { outputDir: config.outputDir });
   } catch (error) {
     heartbeatController.abort();
     await heartbeatLoop;
     if (!leaseLost) {
-      const code = error instanceof DocumentPayloadError ? "invalid_payload" : "processing_failed";
-      await failClaim(config, registration, task, code);
+      await failClaim(
+        config,
+        registration,
+        task,
+        handler.classifyError?.(error) ?? "processing_failed",
+      );
     }
     return;
   }
@@ -371,8 +371,9 @@ async function handleClaim(
 export async function runWorker(
   config: WorkerConfig,
   stopSignal?: AbortSignal,
+  registry: WorkerHandlerRegistry = referenceWorkerRegistry,
 ): Promise<void> {
-  let registration = await register(config);
+  let registration = await register(config, registry);
   let lastSessionHeartbeat = Date.now();
   console.log(
     `reference document worker registered: id=${config.workerId} session=${registration.session_id}`,
@@ -386,7 +387,7 @@ export async function runWorker(
         lastSessionHeartbeat = Date.now();
       } catch (error) {
         if (error instanceof WorkerApiError && error.status === 401) {
-          registration = await register(config);
+          registration = await register(config, registry);
           lastSessionHeartbeat = Date.now();
           continue;
         }
@@ -403,7 +404,7 @@ export async function runWorker(
       task = await claimTask(config, registration);
     } catch (error) {
       if (error instanceof WorkerApiError && error.status === 401) {
-        registration = await register(config);
+        registration = await register(config, registry);
         lastSessionHeartbeat = Date.now();
         continue;
       }
@@ -419,7 +420,7 @@ export async function runWorker(
       continue;
     }
 
-    await handleClaim(config, registration, task);
+    await handleClaim(config, registration, task, registry);
     lastSessionHeartbeat = Date.now();
   }
 }
