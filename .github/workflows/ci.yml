@@ -29,6 +29,7 @@ jobs:
           sh -n tests/termux-worker-protocol-smoke.sh
           bash -n tests/reference-document-worker-smoke.sh
           sh -n tests/termux-reference-document-worker-smoke.sh
+          sh -n tests/termux-result-projection-smoke.sh
           bash -n tests/reference-remote-agent-worker-smoke.sh
           sh -n tests/termux-remote-agent-worker-smoke.sh
           bash -n tests/reference-workflow-worker-smoke.sh
