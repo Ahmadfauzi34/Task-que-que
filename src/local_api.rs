@@ -447,12 +447,10 @@ fn parse_idempotency_headers(
     ) {
         (None, None) => Ok(None),
         (Some(key), Some(fingerprint)) => {
-            validate_idempotency_key(key).map_err(|message| {
-                Response::error(400, "Bad Request", &message)
-            })?;
-            validate_request_fingerprint(fingerprint).map_err(|message| {
-                Response::error(400, "Bad Request", &message)
-            })?;
+            validate_idempotency_key(key)
+                .map_err(|message| Response::error(400, "Bad Request", &message))?;
+            validate_request_fingerprint(fingerprint)
+                .map_err(|message| Response::error(400, "Bad Request", &message))?;
             Ok(Some((key.as_str(), fingerprint.as_str())))
         }
         _ => Err(Response::error(
@@ -500,9 +498,10 @@ fn validate_idempotency_key(value: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > 128 {
         return Err("x-idempotency-key length must be between 1 and 128".into());
     }
-    if !value.bytes().all(|byte| {
-        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':')
-    }) {
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
+    {
         return Err(
             "x-idempotency-key may contain only ASCII alphanumeric characters and . _ - :".into(),
         );
@@ -512,7 +511,9 @@ fn validate_idempotency_key(value: &str) -> Result<(), String> {
 
 fn validate_request_fingerprint(value: &str) -> Result<(), String> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("x-request-fingerprint must be a 64-character hexadecimal SHA-256 digest".into());
+        return Err(
+            "x-request-fingerprint must be a 64-character hexadecimal SHA-256 digest".into(),
+        );
     }
     Ok(())
 }
