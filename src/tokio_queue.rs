@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::idempotency::IdempotencyStore;
 use crate::lease_fence::LeaseFence;
 use crate::sync_queue::{self, RobustSinkhornQueue};
 use crate::value::{
@@ -12,6 +13,7 @@ use crate::value::{
 pub struct AsyncRobustSinkhornQueue {
     inner: Arc<RobustSinkhornQueue>,
     lease_fence: Arc<LeaseFence>,
+    idempotency: Arc<IdempotencyStore>,
 }
 
 impl AsyncRobustSinkhornQueue {
@@ -20,7 +22,8 @@ impl AsyncRobustSinkhornQueue {
 
         Self {
             inner: Arc::new(RobustSinkhornQueue::new(db_path.clone())),
-            lease_fence: Arc::new(LeaseFence::new(db_path)),
+            lease_fence: Arc::new(LeaseFence::new(db_path.clone())),
+            idempotency: Arc::new(IdempotencyStore::new(db_path)),
         }
     }
 
@@ -29,7 +32,8 @@ impl AsyncRobustSinkhornQueue {
 
         Self {
             inner: Arc::new(queue),
-            lease_fence: Arc::new(LeaseFence::new(db_path)),
+            lease_fence: Arc::new(LeaseFence::new(db_path.clone())),
+            idempotency: Arc::new(IdempotencyStore::new(db_path)),
         }
     }
 
@@ -61,9 +65,24 @@ impl AsyncRobustSinkhornQueue {
             })?
     }
 
+    async fn blocking_idempotency<F, T>(&self, op: F) -> sync_queue::QueueResult<T>
+    where
+        F: FnOnce(Arc<IdempotencyStore>) -> sync_queue::QueueResult<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let idempotency = self.idempotency.clone();
+
+        tokio::task::spawn_blocking(move || op(idempotency))
+            .await
+            .map_err(|e| {
+                sync_queue::QueueError::InvalidState(format!("spawn_blocking join error: {e}"))
+            })?
+    }
+
     pub async fn ensure_schema(&self) -> sync_queue::QueueResult<()> {
         self.blocking(|q| q.ensure_schema()).await?;
-        self.blocking_fence(|fence| fence.ensure_schema()).await
+        self.blocking_fence(|fence| fence.ensure_schema()).await?;
+        self.blocking_idempotency(|store| store.ensure_schema()).await
     }
 
     pub async fn enqueue(&self, cmd: EnqueueCommand) -> sync_queue::QueueResult<TaskId> {
