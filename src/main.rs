@@ -14,11 +14,14 @@ use robust_sinkhorn_queue::value::{
 };
 use robust_sinkhorn_queue::{QueueError, QueueResult};
 use tokio::net::TcpListener;
+use tokio::task::{JoinError, JoinSet};
 use tokio::time::MissedTickBehavior;
 
 const DEFAULT_DB_PATH: &str = "queue.db";
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:7331";
 const DEFAULT_MAINTENANCE_INTERVAL_MS: u64 = 2_000;
+
+type ConnectionResult = (SocketAddr, std::io::Result<()>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
@@ -217,6 +220,24 @@ async fn run_doctor(db_path: PathBuf) -> QueueResult<()> {
     Ok(())
 }
 
+fn log_connection_result(result: Result<ConnectionResult, JoinError>) {
+    match result {
+        Ok((_peer, Ok(()))) => {}
+        Ok((peer, Err(error))) => {
+            eprintln!("local API connection error from {peer}: {error}");
+        }
+        Err(error) => {
+            eprintln!("local API connection task join error: {error}");
+        }
+    }
+}
+
+async fn drain_connections(connections: &mut JoinSet<ConnectionResult>) {
+    while let Some(result) = connections.join_next().await {
+        log_connection_result(result);
+    }
+}
+
 async fn run_serve(
     db_path: PathBuf,
     listen_addr: SocketAddr,
@@ -247,6 +268,7 @@ async fn run_serve(
 
     let mut ticker = tokio::time::interval(maintenance_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut connections: JoinSet<ConnectionResult> = JoinSet::new();
 
     loop {
         tokio::select! {
@@ -265,6 +287,11 @@ async fn run_serve(
                     println!("recovered expired leases: {recovered}");
                 }
             }
+            joined = connections.join_next(), if !connections.is_empty() => {
+                if let Some(result) = joined {
+                    log_connection_result(result);
+                }
+            }
             accepted = listener.accept() => {
                 let (stream, peer) = accepted.map_err(|error| {
                     QueueError::InvalidState(format!("local API accept error: {error}"))
@@ -276,14 +303,20 @@ async fn run_serve(
                 }
 
                 let state = api_state.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = serve_connection(stream, state).await {
-                        eprintln!("local API connection error from {peer}: {error}");
-                    }
+                connections.spawn(async move {
+                    let result = serve_connection(stream, state).await;
+                    (peer, result)
                 });
             }
         }
     }
+
+    drop(listener);
+    let in_flight = connections.len();
+    if in_flight > 0 {
+        println!("draining accepted connections: {in_flight}");
+    }
+    drain_connections(&mut connections).await;
 
     println!("shutdown complete");
     Ok(())
@@ -381,6 +414,8 @@ Examples:\n  robust-sinkhorn-queue doctor --db ~/.task-queue/queue.db\n  robust-
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     fn default_addr() -> SocketAddr {
@@ -457,5 +492,28 @@ mod tests {
         assert!(parse_command(["serve", "--maintenance-interval-ms", "abc"]).is_err());
         assert!(parse_command(["doctor", "--unknown"]).is_err());
         assert!(parse_command(["version", "extra"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn drain_connections_waits_for_every_accepted_task() {
+        let completed = Arc::new(AtomicUsize::new(0));
+        let mut connections: JoinSet<ConnectionResult> = JoinSet::new();
+
+        for port in [40001, 40002] {
+            let completed = completed.clone();
+            connections.spawn(async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                completed.fetch_add(1, Ordering::SeqCst);
+                (
+                    SocketAddr::from(([127, 0, 0, 1], port)),
+                    Ok::<(), std::io::Error>(()),
+                )
+            });
+        }
+
+        drain_connections(&mut connections).await;
+
+        assert_eq!(completed.load(Ordering::SeqCst), 2);
+        assert!(connections.is_empty());
     }
 }
