@@ -46,6 +46,7 @@ wait_for_url "http://127.0.0.1:7331/readyz" "$TMP_DIR/rust.log"
 
 cd "$ROOT_DIR/gateway"
 GATEWAY_API_TOKEN="ci-gateway-secret" \
+GATEWAY_MAX_ACTIVE_TASKS="1" \
   bun run src/server.ts \
   >"$TMP_DIR/gateway.log" 2>&1 &
 BUN_PID=$!
@@ -89,6 +90,7 @@ printf '%s' "$created" | grep -F '"replayed":false' >/dev/null
 TASK_ID="$(printf '%s' "$created" | sed -n 's/.*"task_id":\([0-9][0-9]*\).*/\1/p')"
 test -n "$TASK_ID"
 
+# The queue is now at capacity=1. Replay must still precede capacity checking.
 replayed="$(
   curl -fsS -X POST http://127.0.0.1:3000/v1/tasks \
     -H 'Authorization: Bearer ci-gateway-secret' \
@@ -108,6 +110,18 @@ conflict_status="$(
     --data-binary '{"type":"document.process","payload":{"document_id":"different"},"priority":10,"max_retries":3}'
 )"
 test "$conflict_status" = "409"
+
+# A genuinely new idempotency key must be rejected while the active watermark is full.
+capacity_status="$(
+  curl -sS -o "$TMP_DIR/capacity.json" -w '%{http_code}' \
+    -X POST http://127.0.0.1:3000/v1/tasks \
+    -H 'Authorization: Bearer ci-gateway-secret' \
+    -H 'Content-Type: application/json' \
+    -H 'Idempotency-Key: ci-e2e-request-2' \
+    --data-binary '{"type":"document.process","payload":{"document_id":"second"},"priority":10,"max_retries":3}'
+)"
+test "$capacity_status" = "503"
+grep -F '"code":"queue_capacity_reached"' "$TMP_DIR/capacity.json" >/dev/null
 
 snapshot="$(
   curl -fsS "http://127.0.0.1:3000/v1/tasks/$TASK_ID" \
@@ -137,9 +151,10 @@ done
 
 if curl -fsS "http://127.0.0.1:3000/v1/tasks/2" \
   -H 'Authorization: Bearer ci-gateway-secret' >/dev/null 2>&1; then
-  echo "idempotency replay unexpectedly created task 2" >&2
+  echo "capacity rejection unexpectedly created task 2" >&2
   exit 1
 fi
 
 echo "Bun -> Rust idempotent localhost integration: OK (task_id=$TASK_ID)"
 echo "Rust bounded queue metrics integration: OK"
+echo "Durable active-task admission integration: OK (capacity=1)"
