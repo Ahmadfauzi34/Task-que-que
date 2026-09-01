@@ -21,10 +21,19 @@ describe("public task registry", () => {
     });
   });
 
-  test("keeps prototype-looking and unknown names outside the public allowlist", () => {
+  test("maps agent invoke to an independent remote-agent capability", () => {
+    expect(getTaskPolicy(TASK_REGISTRY, "agent.invoke")).toMatchObject({
+      queueKind: "remote-agent",
+      maxPayloadBytes: 256 * 1024,
+    });
+  });
+
+  test("keeps prototype-looking and executor-like names outside the public allowlist", () => {
     expect(getTaskPolicy(TASK_REGISTRY, "constructor")).toBeNull();
     expect(getTaskPolicy(TASK_REGISTRY, "toString")).toBeNull();
     expect(getTaskPolicy(TASK_REGISTRY, "hash.shell")).toBeNull();
     expect(getTaskPolicy(TASK_REGISTRY, "vector.exec")).toBeNull();
+    expect(getTaskPolicy(TASK_REGISTRY, "agent.exec")).toBeNull();
+    expect(getTaskPolicy(TASK_REGISTRY, "agent.url")).toBeNull();
   });
 });

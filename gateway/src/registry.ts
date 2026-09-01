@@ -30,6 +30,13 @@ export const TASK_REGISTRY: TaskRegistry = Object.freeze({
     maxPriority: 1_000,
     maxRetries: 10,
   }),
+  "agent.invoke": Object.freeze({
+    queueKind: "remote-agent",
+    maxPayloadBytes: 256 * 1024,
+    minPriority: -1_000,
+    maxPriority: 1_000,
+    maxRetries: 10,
+  }),
 });
 
 export function getTaskPolicy(
