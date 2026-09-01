@@ -70,7 +70,7 @@ impl Response {
         Self::json(
             status,
             reason,
-            format!("{\"error\":\"{}\"}", json_escape(message)),
+            format!("{{\"error\":\"{}\"}}", json_escape(message)),
         )
     }
 }
@@ -261,7 +261,7 @@ async fn route(request: Request, state: WorkerApiState) -> Response {
             200,
             "OK",
             format!(
-                "{\"status\":\"ok\",\"version\":\"{}\"}",
+                "{{\"status\":\"ok\",\"version\":\"{}\"}}",
                 env!("CARGO_PKG_VERSION")
             ),
         ),
@@ -339,7 +339,7 @@ fn route_session_heartbeat(request: Request, state: WorkerApiState) -> Response 
             200,
             "OK",
             format!(
-                "{\"status\":\"alive\",\"worker_id\":\"{}\",\"session_id\":\"{}\"}",
+                "{{\"status\":\"alive\",\"worker_id\":\"{}\",\"session_id\":\"{}\"}}",
                 json_escape(&session.worker_id),
                 json_escape(&session.session_id)
             ),
@@ -367,7 +367,7 @@ async fn route_claim(request: Request, state: WorkerApiState) -> Response {
             "OK",
             format!(
                 concat!(
-                    "{",
+                    "{{",
                     "\"task_id\":{},",
                     "\"task_name\":\"{}\",",
                     "\"task_type\":\"{}\",",
@@ -376,7 +376,7 @@ async fn route_claim(request: Request, state: WorkerApiState) -> Response {
                     "\"max_retries\":{},",
                     "\"lease_generation\":{},",
                     "\"lease_ms\":{}",
-                    "}"
+                    "}}"
                 ),
                 task.id.value(),
                 json_escape(task.task_name.as_str()),
@@ -442,10 +442,7 @@ async fn route_task_complete(request: Request, state: WorkerApiState) -> Respons
             .get("content-type")
             .map(String::as_str)
             .unwrap_or("");
-        if !content_type
-            .to_ascii_lowercase()
-            .starts_with("application/json")
-        {
+        if !content_type.to_ascii_lowercase().starts_with("application/json") {
             return Response::error(
                 415,
                 "Unsupported Media Type",
@@ -636,7 +633,7 @@ fn validate_identifier(value: &str, max_len: usize, field: &str) -> Result<(), S
 fn registration_json(registration: &WorkerRegistration, ttl: Duration, lease: Duration) -> String {
     format!(
         concat!(
-            "{",
+            "{{",
             "\"worker_id\":\"{}\",",
             "\"worker_type\":\"{}\",",
             "\"capacity\":{},",
@@ -644,7 +641,7 @@ fn registration_json(registration: &WorkerRegistration, ttl: Duration, lease: Du
             "\"session_token\":\"{}\",",
             "\"session_ttl_ms\":{},",
             "\"task_lease_ms\":{}",
-            "}"
+            "}}"
         ),
         json_escape(&registration.session.worker_id),
         json_escape(&registration.session.kind.to_db()),
@@ -764,16 +761,14 @@ mod tests {
 
         let mut stale_complete = request("POST", "/v1/task/complete");
         credentials(&mut stale_complete, &registration);
-        stale_complete
-            .headers
-            .insert("x-task-id".into(), "1".into());
+        stale_complete.headers.insert("x-task-id".into(), "1".into());
         stale_complete
             .headers
             .insert("x-lease-generation".into(), "2".into());
         stale_complete
             .headers
             .insert("content-type".into(), "application/json".into());
-        stale_complete.body = br#"{\"stale\":true}"#.to_vec();
+        stale_complete.body = br#"{"stale":true}"#.to_vec();
         assert_eq!(route(stale_complete, state.clone()).await.status, 409);
         assert_eq!(TaskResultStore::new(&db_path).get(1).unwrap(), None);
 
@@ -783,15 +778,14 @@ mod tests {
         complete
             .headers
             .insert("x-lease-generation".into(), "1".into());
-        complete.headers.insert(
-            "content-type".into(),
-            "application/json; charset=utf-8".into(),
-        );
-        complete.body = br#"{\"digest\":\"abc\"}"#.to_vec();
+        complete
+            .headers
+            .insert("content-type".into(), "application/json; charset=utf-8".into());
+        complete.body = br#"{"digest":"abc"}"#.to_vec();
         assert_eq!(route(complete, state).await.status, 200);
 
         let projection = TaskResultStore::new(&db_path).get(1).unwrap().unwrap();
-        assert_eq!(projection.result_json, r#"{\"digest\":\"abc\"}"#);
+        assert_eq!(projection.result_json, r#"{"digest":"abc"}"#);
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
@@ -819,9 +813,7 @@ mod tests {
 
         let registry = WorkerRegistry::new(Duration::from_secs(60)).unwrap();
         let lease = LeaseDuration::new(Duration::from_secs(30)).unwrap();
-        let registration = registry
-            .register("worker-legacy", WorkerKind::Cpu, 1)
-            .unwrap();
+        let registration = registry.register("worker-legacy", WorkerKind::Cpu, 1).unwrap();
         let coordinator = WorkerCoordinator::new(
             &db_path,
             registry.clone(),
@@ -868,7 +860,7 @@ mod tests {
         complete
             .headers
             .insert("x-lease-generation".into(), "1".into());
-        complete.body = br#"{\"x\":1}"#.to_vec();
+        complete.body = br#"{"x":1}"#.to_vec();
         assert_eq!(route(complete, state).await.status, 415);
 
         let _ = std::fs::remove_file(&db_path);
