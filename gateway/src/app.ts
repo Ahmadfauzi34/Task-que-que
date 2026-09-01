@@ -1,7 +1,8 @@
+import type { AdmissionController } from "./admission";
 import type { GatewayConfig } from "./config";
 import { getTaskPolicy, type TaskRegistry } from "./registry";
 
-export const GATEWAY_VERSION = "0.1.0";
+export const GATEWAY_VERSION = "0.2.0";
 export const MAX_PUBLIC_REQUEST_BYTES = 1024 * 1024;
 
 export type FetchLike = (
@@ -12,6 +13,7 @@ export type FetchLike = (
 export interface GatewayDependencies {
   config: GatewayConfig;
   registry: TaskRegistry;
+  admissionController: AdmissionController;
   fetchImpl?: FetchLike;
 }
 
@@ -34,8 +36,13 @@ function jsonResponse(value: unknown, status = 200, extraHeaders?: HeadersInit):
   return new Response(`${JSON.stringify(value)}\n`, { status, headers });
 }
 
-function errorResponse(status: number, code: string, message: string): Response {
-  return jsonResponse({ error: { code, message } }, status);
+function errorResponse(
+  status: number,
+  code: string,
+  message: string,
+  extraHeaders?: HeadersInit,
+): Response {
+  return jsonResponse({ error: { code, message } }, status, extraHeaders);
 }
 
 function constantTimeEqual(left: string, right: string): boolean {
@@ -133,6 +140,75 @@ async function parsePublicTaskRequest(request: Request): Promise<PublicTaskReque
   return parsed as unknown as PublicTaskRequest;
 }
 
+function parseIdempotencyKey(request: Request): string | Response {
+  const value = request.headers.get("idempotency-key");
+  if (!value) {
+    return errorResponse(
+      400,
+      "missing_idempotency_key",
+      "Idempotency-Key header is required for task creation",
+    );
+  }
+
+  if (value.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(value)) {
+    return errorResponse(
+      400,
+      "invalid_idempotency_key",
+      "Idempotency-Key must be 1..128 ASCII characters using A-Z a-z 0-9 . _ : -",
+    );
+  }
+
+  return value;
+}
+
+function canonicalJson(value: unknown): string {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+
+  throw new Error("request contains a non-JSON value");
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function requestFingerprint(
+  taskType: string,
+  queueKind: string,
+  priority: number,
+  maxRetries: number,
+  payload: unknown,
+): Promise<string> {
+  return sha256Hex(
+    canonicalJson({
+      contract_version: 1,
+      type: taskType,
+      queue_kind: queueKind,
+      priority,
+      max_retries: maxRetries,
+      payload,
+    }),
+  );
+}
+
 async function fetchWithTimeout(
   fetchImpl: FetchLike,
   input: string,
@@ -179,11 +255,17 @@ async function handleCreateTask(
   request: Request,
   config: GatewayConfig,
   registry: TaskRegistry,
+  admissionController: AdmissionController,
   fetchImpl: FetchLike,
 ): Promise<Response> {
   const denied = requireAuthorization(request, config);
   if (denied) {
     return denied;
+  }
+
+  const idempotencyKey = parseIdempotencyKey(request);
+  if (idempotencyKey instanceof Response) {
+    return idempotencyKey;
   }
 
   const parsed = await parsePublicTaskRequest(request);
@@ -224,6 +306,29 @@ async function handleCreateTask(
     );
   }
 
+  const admission = admissionController.tryAcquire();
+  if (!admission.allowed) {
+    return errorResponse(
+      429,
+      "rate_limited",
+      "task admission rate exceeded; retry later with the same Idempotency-Key",
+      { "retry-after": String(admission.retryAfterSeconds) },
+    );
+  }
+
+  let fingerprint: string;
+  try {
+    fingerprint = await requestFingerprint(
+      parsed.type,
+      policy.queueKind,
+      priority,
+      maxRetries,
+      parsed.payload,
+    );
+  } catch {
+    return errorResponse(400, "invalid_payload", "payload must contain only valid JSON values");
+  }
+
   try {
     const upstream = await fetchWithTimeout(
       fetchImpl,
@@ -236,22 +341,42 @@ async function handleCreateTask(
           "x-task-type": policy.queueKind,
           "x-task-priority": String(priority),
           "x-task-max-retries": String(maxRetries),
+          "x-idempotency-key": idempotencyKey,
+          "x-request-fingerprint": fingerprint,
         },
         body: payload,
       },
       config.upstreamTimeoutMs,
     );
 
+    if (upstream.status === 409) {
+      return errorResponse(
+        409,
+        "idempotency_conflict",
+        "Idempotency-Key was already used for a different task request",
+      );
+    }
     if (upstream.status !== 202) {
       return errorResponse(502, "queue_rejected_task", "queue daemon rejected the task");
     }
 
     const body = (await upstream.json()) as Record<string, unknown>;
-    if (!Number.isInteger(body.task_id) || (body.task_id as number) <= 0 || body.status !== "PENDING") {
+    const idempotency = body.idempotency;
+    if (
+      !Number.isInteger(body.task_id) ||
+      (body.task_id as number) <= 0 ||
+      body.status !== "PENDING" ||
+      (idempotency !== "created" && idempotency !== "replayed")
+    ) {
       return errorResponse(502, "invalid_queue_response", "queue daemon returned an invalid response");
     }
 
-    return jsonResponse({ task_id: body.task_id, status: "PENDING" }, 202);
+    const replayed = idempotency === "replayed";
+    return jsonResponse(
+      { task_id: body.task_id, status: "PENDING", replayed },
+      202,
+      replayed ? { "idempotency-replayed": "true" } : undefined,
+    );
   } catch {
     return errorResponse(503, "queue_unavailable", "queue daemon is unavailable");
   }
@@ -330,7 +455,7 @@ export async function handleRequest(
   request: Request,
   dependencies: GatewayDependencies,
 ): Promise<Response> {
-  const { config, registry, fetchImpl = fetch } = dependencies;
+  const { config, registry, admissionController, fetchImpl = fetch } = dependencies;
   const url = new URL(request.url);
   const path = url.pathname;
 
@@ -348,7 +473,7 @@ export async function handleRequest(
 
   if (path === "/v1/tasks") {
     return request.method === "POST"
-      ? handleCreateTask(request, config, registry, fetchImpl)
+      ? handleCreateTask(request, config, registry, admissionController, fetchImpl)
       : errorResponse(405, "method_not_allowed", "POST required");
   }
 
