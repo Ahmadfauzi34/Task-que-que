@@ -202,12 +202,7 @@ mod tests {
         assert_eq!(store.get(task_id).unwrap(), None);
 
         let applied = store
-            .complete_with_projection(
-                task_id,
-                "worker-a",
-                generation,
-                r#"{"digest":"abc"}"#,
-            )
+            .complete_with_projection(task_id, "worker-a", generation, r#"{"digest":"abc"}"#)
             .unwrap();
         assert_eq!(applied, LeaseMutation::Applied);
         let result = store.get(task_id).unwrap().unwrap();
