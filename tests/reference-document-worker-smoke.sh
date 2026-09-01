@@ -12,13 +12,37 @@ GATEWAY_PID=""
 DOCUMENT_PID=""
 TOKEN="reference-worker-proof-token"
 
-cleanup() {
-  for pid in "$DOCUMENT_PID" "$GATEWAY_PID" "$BROKER_PID" "$QUEUE_PID"; do
-    if [[ -n "$pid" ]]; then
-      kill -INT "$pid" >/dev/null 2>&1 || true
+stop_process() {
+  local pid="$1"
+  [[ -n "$pid" ]] || return 0
+
+  kill -INT "$pid" >/dev/null 2>&1 || true
+  for _ in {1..30}; do
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
       wait "$pid" >/dev/null 2>&1 || true
+      return 0
     fi
+    sleep 0.1
   done
+
+  kill -TERM "$pid" >/dev/null 2>&1 || true
+  for _ in {1..20}; do
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      wait "$pid" >/dev/null 2>&1 || true
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  kill -KILL "$pid" >/dev/null 2>&1 || true
+  wait "$pid" >/dev/null 2>&1 || true
+}
+
+cleanup() {
+  stop_process "$DOCUMENT_PID"
+  stop_process "$GATEWAY_PID"
+  stop_process "$BROKER_PID"
+  stop_process "$QUEUE_PID"
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
