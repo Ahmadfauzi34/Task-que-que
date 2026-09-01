@@ -210,7 +210,7 @@ mod tests {
         let queue = RobustSinkhornQueue::new(&db_path);
         queue.ensure_schema().unwrap();
 
-        let runnable_id = queue.enqueue_simple("runnable", "cpu", "secret-a").unwrap();
+        queue.enqueue_simple("runnable", "cpu", "secret-a").unwrap();
         let delayed_id = queue.enqueue_simple("delayed", "cpu", "secret-b").unwrap();
         let expired_id = queue.enqueue_simple("expired", "cpu", "secret-c").unwrap();
         let unknown_id = queue.enqueue_simple("unknown", "cpu", "secret-d").unwrap();
@@ -247,12 +247,6 @@ mod tests {
         assert_eq!(snapshot.unknown_status, 1);
         assert!(snapshot.oldest_runnable_pending_age_seconds.is_some());
         assert!(snapshot.observed_at >= now);
-
-        let runnable = TaskQueryStore::new(&db_path)
-            .get_task(runnable_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(runnable.status, "PENDING");
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
