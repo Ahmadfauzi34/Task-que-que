@@ -205,10 +205,8 @@ mod tests {
 
     #[test]
     fn metrics_report_storage_facts_without_inventing_stuck_state() {
-        let db_path = std::env::temp_dir().join(format!(
-            "task_query_metrics_{}.db",
-            rand::random::<u64>()
-        ));
+        let db_path =
+            std::env::temp_dir().join(format!("task_query_metrics_{}.db", rand::random::<u64>()));
         let queue = RobustSinkhornQueue::new(&db_path);
         queue.ensure_schema().unwrap();
 
