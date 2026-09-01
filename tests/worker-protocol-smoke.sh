@@ -23,15 +23,39 @@ fail() {
   exit 1
 }
 
+stop_process() {
+  pid="$1"
+  [ -n "$pid" ] || return 0
+
+  kill -INT "$pid" >/dev/null 2>&1 || true
+  attempts=0
+  while [ "$attempts" -lt 30 ]; do
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      wait "$pid" >/dev/null 2>&1 || true
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+
+  kill -TERM "$pid" >/dev/null 2>&1 || true
+  attempts=0
+  while [ "$attempts" -lt 20 ]; do
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      wait "$pid" >/dev/null 2>&1 || true
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+
+  kill -KILL "$pid" >/dev/null 2>&1 || true
+  wait "$pid" >/dev/null 2>&1 || true
+}
+
 cleanup() {
-  if [ -n "$WORKER_PID" ]; then
-    kill -INT "$WORKER_PID" >/dev/null 2>&1 || true
-    wait "$WORKER_PID" >/dev/null 2>&1 || true
-  fi
-  if [ -n "$QUEUE_PID" ]; then
-    kill -INT "$QUEUE_PID" >/dev/null 2>&1 || true
-    wait "$QUEUE_PID" >/dev/null 2>&1 || true
-  fi
+  stop_process "$WORKER_PID"
+  stop_process "$QUEUE_PID"
   rm -rf "$TMP_DIR"
 }
 trap cleanup 0
