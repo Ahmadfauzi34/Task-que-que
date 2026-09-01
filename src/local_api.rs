@@ -368,7 +368,8 @@ async fn route_enqueue(request: Request, state: LocalApiState) -> Response {
         let task_name_for_store = task_name.clone();
         let task_type_for_store = task_type.clone();
         let payload_for_store = payload.clone();
-        let max_active_tasks = max_active_tasks.expect("bounded policy exists for idempotent request");
+        let max_active_tasks =
+            max_active_tasks.expect("bounded policy exists for idempotent request");
 
         return match tokio::task::spawn_blocking(move || {
             store.ensure_schema()?;
@@ -723,7 +724,12 @@ mod tests {
         }
     }
 
-    fn idempotent_request(key: &str, fingerprint: &str, payload: &[u8], max_active: i64) -> Request {
+    fn idempotent_request(
+        key: &str,
+        fingerprint: &str,
+        payload: &[u8],
+        max_active: i64,
+    ) -> Request {
         let mut enqueue = request("POST", "/v1/tasks");
         enqueue
             .headers
@@ -735,10 +741,9 @@ mod tests {
         enqueue
             .headers
             .insert("x-request-fingerprint".into(), fingerprint.into());
-        enqueue.headers.insert(
-            "x-queue-max-active-tasks".into(),
-            max_active.to_string(),
-        );
+        enqueue
+            .headers
+            .insert("x-queue-max-active-tasks".into(), max_active.to_string());
         enqueue.body = payload.to_vec();
         enqueue
     }
