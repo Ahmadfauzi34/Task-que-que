@@ -110,6 +110,7 @@ export const hashComputeHandler: WorkerHandler = {
   async handle(task, context) {
     const result = await computeHash(task.task_id, task.payload);
     await writeHashResultAtomic(context.outputDir, result);
+    return result;
   },
 
   classifyError(error) {
