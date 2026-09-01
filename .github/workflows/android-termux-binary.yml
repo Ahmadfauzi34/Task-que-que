@@ -35,7 +35,7 @@ jobs:
           test -x "$NDK_BIN/llvm-ar"
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
 
-      - name: Build release binary for Android ARM64
+      - name: Build release binaries for Android ARM64
         shell: bash
         run: |
           set -euo pipefail
@@ -45,23 +45,28 @@ jobs:
           export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android21-clang"
           export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
 
-          cargo build --release --locked --target aarch64-linux-android
+          cargo build --release --locked --target aarch64-linux-android \
+            --bin robust-sinkhorn-queue \
+            --bin robust-sinkhorn-worker
 
-      - name: Validate produced ELF
+      - name: Validate produced ELFs
         shell: bash
         run: |
           set -euo pipefail
-          BIN="target/aarch64-linux-android/release/robust-sinkhorn-queue"
+          for BIN in \
+            target/aarch64-linux-android/release/robust-sinkhorn-queue \
+            target/aarch64-linux-android/release/robust-sinkhorn-worker
+          do
+            test -f "$BIN"
+            file "$BIN"
+            file "$BIN" | grep -Eq "ARM aarch64|aarch64"
+            readelf -l "$BIN" | grep -F "/system/bin/linker64"
 
-          test -f "$BIN"
-          file "$BIN"
-          file "$BIN" | grep -Eq "ARM aarch64|aarch64"
-          readelf -l "$BIN" | grep -F "/system/bin/linker64"
-
-          if readelf -d "$BIN" | grep -Eq "libc\.so\.6|ld-linux"; then
-            echo "Unexpected glibc dependency detected"
-            exit 1
-          fi
+            if readelf -d "$BIN" | grep -Eq "libc\.so\.6|ld-linux"; then
+              echo "Unexpected glibc dependency detected in $BIN"
+              exit 1
+            fi
+          done
 
       - name: Prepare distribution files
         shell: bash
@@ -70,10 +75,14 @@ jobs:
           mkdir -p dist
           cp target/aarch64-linux-android/release/robust-sinkhorn-queue \
             dist/robust-sinkhorn-queue-aarch64-linux-android
+          cp target/aarch64-linux-android/release/robust-sinkhorn-worker \
+            dist/robust-sinkhorn-worker-aarch64-linux-android
           (
             cd dist
             sha256sum robust-sinkhorn-queue-aarch64-linux-android \
               > robust-sinkhorn-queue-aarch64-linux-android.sha256
+            sha256sum robust-sinkhorn-worker-aarch64-linux-android \
+              > robust-sinkhorn-worker-aarch64-linux-android.sha256
           )
 
       - name: Upload workflow artifact
@@ -83,6 +92,8 @@ jobs:
           path: |
             dist/robust-sinkhorn-queue-aarch64-linux-android
             dist/robust-sinkhorn-queue-aarch64-linux-android.sha256
+            dist/robust-sinkhorn-worker-aarch64-linux-android
+            dist/robust-sinkhorn-worker-aarch64-linux-android.sha256
           if-no-files-found: error
           retention-days: 30
 
