@@ -7,6 +7,7 @@ pub mod sync_queue;
 pub mod task_query;
 pub mod tokio_queue;
 pub mod value;
+pub mod worker_protocol;
 
 pub use sync_queue::{
     ClaimedTask as SyncClaimedTask, DatabaseManager, DispatchedTask as SyncDispatchedTask,
