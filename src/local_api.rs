@@ -8,7 +8,7 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 use crate::idempotency::{IdempotencyStore, IdempotentEnqueueResult};
-use crate::task_query::{TaskQueryStore, TaskSnapshot};
+use crate::task_query::{QueueMetricsSnapshot, TaskQueryStore, TaskSnapshot};
 use crate::tokio_queue::AsyncRobustSinkhornQueue;
 use crate::value::{EnqueueCommand, MaxRetries, Priority, TaskKind, TaskName, TaskPayload};
 
@@ -273,6 +273,9 @@ async fn route(request: Request, state: LocalApiState) -> Response {
     if request.method == "GET" && request.path == "/readyz" {
         return route_ready(state).await;
     }
+    if request.method == "GET" && request.path == "/metricsz" {
+        return route_metrics(state).await;
+    }
     if request.method == "POST" && request.path == "/v1/tasks" {
         return route_enqueue(request, state).await;
     }
@@ -287,6 +290,15 @@ async fn route_ready(state: LocalApiState) -> Response {
     let query = state.query.clone();
     match tokio::task::spawn_blocking(move || query.ping()).await {
         Ok(Ok(())) => Response::json(200, "OK", "{\"status\":\"ready\"}".into()),
+        Ok(Err(error)) => Response::error(503, "Service Unavailable", &error.to_string()),
+        Err(error) => Response::error(503, "Service Unavailable", &error.to_string()),
+    }
+}
+
+async fn route_metrics(state: LocalApiState) -> Response {
+    let query = state.query.clone();
+    match tokio::task::spawn_blocking(move || query.metrics()).await {
+        Ok(Ok(snapshot)) => Response::json(200, "OK", metrics_json(&snapshot)),
         Ok(Err(error)) => Response::error(503, "Service Unavailable", &error.to_string()),
         Err(error) => Response::error(503, "Service Unavailable", &error.to_string()),
     }
@@ -518,6 +530,49 @@ fn validate_request_fingerprint(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn metrics_json(snapshot: &QueueMetricsSnapshot) -> String {
+    format!(
+        concat!(
+            "{{",
+            "\"observed_at\":{},",
+            "\"total_tasks\":{},",
+            "\"states\":{{",
+            "\"pending\":{},",
+            "\"assigned\":{},",
+            "\"running\":{},",
+            "\"completed\":{},",
+            "\"failed\":{},",
+            "\"unknown\":{}",
+            "}},",
+            "\"pending\":{{",
+            "\"runnable\":{},",
+            "\"delayed\":{},",
+            "\"oldest_runnable_age_seconds\":{}",
+            "}},",
+            "\"leases\":{{",
+            "\"active\":{},",
+            "\"expired\":{},",
+            "\"active_without_deadline\":{}",
+            "}}",
+            "}}"
+        ),
+        json_f64(snapshot.observed_at),
+        snapshot.total_tasks,
+        snapshot.pending,
+        snapshot.assigned,
+        snapshot.running,
+        snapshot.completed,
+        snapshot.failed,
+        snapshot.unknown_status,
+        snapshot.pending_runnable,
+        snapshot.pending_delayed,
+        json_option_f64(snapshot.oldest_runnable_pending_age_seconds),
+        snapshot.active_leases,
+        snapshot.expired_leases,
+        snapshot.active_without_lease_deadline,
+    )
+}
+
 fn snapshot_json(snapshot: &TaskSnapshot) -> String {
     format!(
         concat!(
@@ -655,7 +710,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enqueue_and_read_task_snapshot() {
+    async fn enqueue_read_and_metrics_snapshot() {
         let db_path = std::env::temp_dir().join(format!("local_api_{}.db", rand::random::<u64>()));
         let queue = AsyncRobustSinkhornQueue::new(&db_path);
         queue.ensure_schema().await.unwrap();
@@ -673,10 +728,19 @@ mod tests {
         assert_eq!(created.status, 202);
         assert!(created.body.contains("\"task_id\":1"));
 
-        let fetched = route(request("GET", "/v1/tasks/1"), state).await;
+        let fetched = route(request("GET", "/v1/tasks/1"), state.clone()).await;
         assert_eq!(fetched.status, 200);
         assert!(fetched.body.contains("\"task_name\":\"document.process\""));
         assert!(fetched.body.contains("\"status\":\"PENDING\""));
+
+        let metrics = route(request("GET", "/metricsz"), state).await;
+        assert_eq!(metrics.status, 200);
+        assert!(metrics.body.contains("\"total_tasks\":1"));
+        assert!(metrics.body.contains("\"runnable\":1"));
+        assert!(metrics.body.contains("\"expired\":0"));
+        assert!(!metrics.body.contains("document.process"));
+        assert!(!metrics.body.contains("document_id"));
+        assert!(!metrics.body.contains("abc"));
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
