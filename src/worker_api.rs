@@ -7,13 +7,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+use crate::result_projection::MAX_RESULT_PROJECTION_BYTES;
 use crate::task_query::TaskQueryStore;
 use crate::tokio_queue::AsyncRobustSinkhornQueue;
 use crate::value::{LeaseGeneration, LeaseMutation, TaskId, WorkerId, WorkerKind};
 use crate::worker_protocol::{WorkerRegistration, WorkerRegistry, WorkerSession};
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
-const MAX_BODY_BYTES: usize = 8 * 1024;
+const MAX_BODY_BYTES: usize = MAX_RESULT_PROJECTION_BYTES;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_WORKER_CAPACITY: i64 = 1_000_000;
 
@@ -165,7 +166,7 @@ async fn read_request(stream: &mut TcpStream) -> Result<Request, HttpError> {
         return Err(HttpError::new(
             413,
             "Payload Too Large",
-            "worker API request body exceeds 8 KiB",
+            "worker API request body exceeds 256 KiB",
         ));
     }
 
@@ -424,9 +425,6 @@ async fn route_task_heartbeat(request: Request, state: WorkerApiState) -> Respon
 }
 
 async fn route_task_complete(request: Request, state: WorkerApiState) -> Response {
-    if let Err(response) = require_empty_body(&request) {
-        return response;
-    }
     let session = match authenticate(&request.headers, &state.registry) {
         Ok(session) => session,
         Err(response) => return response,
@@ -436,15 +434,59 @@ async fn route_task_complete(request: Request, state: WorkerApiState) -> Respons
         Err(response) => return response,
     };
 
-    match state
-        .queue
-        .complete_task(
-            TaskId::new(task_id),
-            WorkerId::new(session.session_id),
-            LeaseGeneration::new(generation),
-        )
-        .await
-    {
+    let projection = if request.body.is_empty() {
+        None
+    } else {
+        let content_type = request
+            .headers
+            .get("content-type")
+            .map(String::as_str)
+            .unwrap_or("");
+        if !content_type.to_ascii_lowercase().starts_with("application/json") {
+            return Response::error(
+                415,
+                "Unsupported Media Type",
+                "result projection body must use application/json",
+            );
+        }
+        match String::from_utf8(request.body) {
+            Ok(value) if !value.is_empty() => Some(value),
+            Ok(_) => None,
+            Err(_) => {
+                return Response::error(
+                    400,
+                    "Bad Request",
+                    "result projection body must be valid UTF-8",
+                )
+            }
+        }
+    };
+
+    let result = match projection {
+        Some(result_json) => {
+            state
+                .queue
+                .complete_task_with_projection(
+                    TaskId::new(task_id),
+                    WorkerId::new(session.session_id),
+                    LeaseGeneration::new(generation),
+                    result_json,
+                )
+                .await
+        }
+        None => {
+            state
+                .queue
+                .complete_task(
+                    TaskId::new(task_id),
+                    WorkerId::new(session.session_id),
+                    LeaseGeneration::new(generation),
+                )
+                .await
+        }
+    };
+
+    match result {
         Ok(LeaseMutation::Applied) => {
             Response::json(200, "OK", "{\"transition\":\"applied\"}".into())
         }
@@ -655,6 +697,7 @@ async fn write_response(stream: &mut TcpStream, response: Response) -> io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::result_projection::TaskResultStore;
     use crate::value::{
         Epsilon, LeaseDuration, MaxRetries, Priority, TaskKind, TaskName, TaskPayload,
     };
@@ -680,7 +723,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worker_claim_is_fenced_and_payload_is_available_only_after_assignment() {
+    async fn worker_claim_is_fenced_and_projection_is_atomic_with_completion() {
         let db_path =
             std::env::temp_dir().join(format!("worker_api_claim_{}.db", rand::random::<u64>()));
         let queue = AsyncRobustSinkhornQueue::new(&db_path);
@@ -718,13 +761,71 @@ mod tests {
 
         let mut stale_complete = request("POST", "/v1/task/complete");
         credentials(&mut stale_complete, &registration);
-        stale_complete
-            .headers
-            .insert("x-task-id".into(), "1".into());
+        stale_complete.headers.insert("x-task-id".into(), "1".into());
         stale_complete
             .headers
             .insert("x-lease-generation".into(), "2".into());
+        stale_complete
+            .headers
+            .insert("content-type".into(), "application/json".into());
+        stale_complete.body = br#"{"stale":true}"#.to_vec();
         assert_eq!(route(stale_complete, state.clone()).await.status, 409);
+        assert_eq!(TaskResultStore::new(&db_path).get(1).unwrap(), None);
+
+        let mut complete = request("POST", "/v1/task/complete");
+        credentials(&mut complete, &registration);
+        complete.headers.insert("x-task-id".into(), "1".into());
+        complete
+            .headers
+            .insert("x-lease-generation".into(), "1".into());
+        complete
+            .headers
+            .insert("content-type".into(), "application/json; charset=utf-8".into());
+        complete.body = br#"{"digest":"abc"}"#.to_vec();
+        assert_eq!(route(complete, state).await.status, 200);
+
+        let projection = TaskResultStore::new(&db_path).get(1).unwrap().unwrap();
+        assert_eq!(projection.result_json, r#"{"digest":"abc"}"#);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn complete_without_projection_remains_backward_compatible() {
+        let db_path = std::env::temp_dir().join(format!(
+            "worker_api_complete_compat_{}.db",
+            rand::random::<u64>()
+        ));
+        let queue = AsyncRobustSinkhornQueue::new(&db_path);
+        queue.ensure_schema().await.unwrap();
+        queue
+            .enqueue(crate::value::EnqueueCommand {
+                name: TaskName::new("legacy.task"),
+                kind: TaskKind::Cpu,
+                payload: TaskPayload::new("{}"),
+                priority: Priority::new(0),
+                max_retries: MaxRetries::new(3).unwrap(),
+            })
+            .await
+            .unwrap();
+
+        let registry = WorkerRegistry::new(Duration::from_secs(60)).unwrap();
+        let lease = LeaseDuration::new(Duration::from_secs(30)).unwrap();
+        let registration = registry.register("worker-legacy", WorkerKind::Cpu, 1).unwrap();
+        let coordinator = WorkerCoordinator::new(
+            &db_path,
+            registry.clone(),
+            Epsilon::new(1.5).unwrap(),
+            lease,
+        );
+        assert_eq!(coordinator.dispatch_available().await.unwrap().len(), 1);
+        let state = WorkerApiState::new(queue, &db_path, registry, lease);
+
+        let mut claim = request("POST", "/v1/claim");
+        credentials(&mut claim, &registration);
+        assert_eq!(route(claim, state.clone()).await.status, 200);
 
         let mut complete = request("POST", "/v1/task/complete");
         credentials(&mut complete, &registration);
@@ -733,10 +834,36 @@ mod tests {
             .headers
             .insert("x-lease-generation".into(), "1".into());
         assert_eq!(route(complete, state).await.status, 200);
+        assert_eq!(TaskResultStore::new(&db_path).get(1).unwrap(), None);
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
         let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn projection_body_requires_json_media_type() {
+        let db_path = std::env::temp_dir().join(format!(
+            "worker_api_projection_type_{}.db",
+            rand::random::<u64>()
+        ));
+        let queue = AsyncRobustSinkhornQueue::new(&db_path);
+        queue.ensure_schema().await.unwrap();
+        let registry = WorkerRegistry::new(Duration::from_secs(60)).unwrap();
+        let lease = LeaseDuration::new(Duration::from_secs(30)).unwrap();
+        let registration = registry.register("worker-a", WorkerKind::Cpu, 1).unwrap();
+        let state = WorkerApiState::new(queue, &db_path, registry, lease);
+
+        let mut complete = request("POST", "/v1/task/complete");
+        credentials(&mut complete, &registration);
+        complete.headers.insert("x-task-id".into(), "1".into());
+        complete
+            .headers
+            .insert("x-lease-generation".into(), "1".into());
+        complete.body = br#"{"x":1}"#.to_vec();
+        assert_eq!(route(complete, state).await.status, 415);
+
+        let _ = std::fs::remove_file(&db_path);
     }
 
     #[tokio::test]
