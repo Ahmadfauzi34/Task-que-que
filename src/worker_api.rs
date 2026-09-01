@@ -58,7 +58,11 @@ struct Response {
 
 impl Response {
     fn json(status: u16, reason: &'static str, body: String) -> Self {
-        Self { status, reason, body }
+        Self {
+            status,
+            reason,
+            body,
+        }
     }
 
     fn error(status: u16, reason: &'static str, message: &str) -> Self {
@@ -374,8 +378,8 @@ async fn route_claim(request: Request, state: WorkerApiState) -> Response {
                     "}}"
                 ),
                 task.id.value(),
-                json_escape(task.name.as_str()),
-                json_escape(&task.kind.to_db()),
+                json_escape(task.task_name.as_str()),
+                json_escape(&task.task_kind.to_db()),
                 json_escape(task.payload.as_str()),
                 task.retry_count.value(),
                 task.max_retries.value(),
@@ -584,11 +588,7 @@ fn validate_identifier(value: &str, max_len: usize, field: &str) -> Result<(), S
     Ok(())
 }
 
-fn registration_json(
-    registration: &WorkerRegistration,
-    ttl: Duration,
-    lease: Duration,
-) -> String {
+fn registration_json(registration: &WorkerRegistration, ttl: Duration, lease: Duration) -> String {
     format!(
         concat!(
             "{{",
@@ -655,7 +655,9 @@ async fn write_response(stream: &mut TcpStream, response: Response) -> io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::value::{Epsilon, LeaseDuration, MaxRetries, Priority, TaskKind, TaskName, TaskPayload};
+    use crate::value::{
+        Epsilon, LeaseDuration, MaxRetries, Priority, TaskKind, TaskName, TaskPayload,
+    };
     use crate::worker_protocol::WorkerCoordinator;
 
     fn request(method: &str, path: &str) -> Request {
@@ -672,18 +674,15 @@ mod tests {
             "x-worker-session".into(),
             registration.session.session_id.clone(),
         );
-        request.headers.insert(
-            "x-worker-token".into(),
-            registration.session_token.clone(),
-        );
+        request
+            .headers
+            .insert("x-worker-token".into(), registration.session_token.clone());
     }
 
     #[tokio::test]
     async fn worker_claim_is_fenced_and_payload_is_available_only_after_assignment() {
-        let db_path = std::env::temp_dir().join(format!(
-            "worker_api_claim_{}.db",
-            rand::random::<u64>()
-        ));
+        let db_path =
+            std::env::temp_dir().join(format!("worker_api_claim_{}.db", rand::random::<u64>()));
         let queue = AsyncRobustSinkhornQueue::new(&db_path);
         queue.ensure_schema().await.unwrap();
         queue
@@ -719,7 +718,9 @@ mod tests {
 
         let mut stale_complete = request("POST", "/v1/task/complete");
         credentials(&mut stale_complete, &registration);
-        stale_complete.headers.insert("x-task-id".into(), "1".into());
+        stale_complete
+            .headers
+            .insert("x-task-id".into(), "1".into());
         stale_complete
             .headers
             .insert("x-lease-generation".into(), "2".into());
@@ -740,10 +741,8 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_worker_token_cannot_claim() {
-        let db_path = std::env::temp_dir().join(format!(
-            "worker_api_auth_{}.db",
-            rand::random::<u64>()
-        ));
+        let db_path =
+            std::env::temp_dir().join(format!("worker_api_auth_{}.db", rand::random::<u64>()));
         let queue = AsyncRobustSinkhornQueue::new(&db_path);
         queue.ensure_schema().await.unwrap();
         let registry = WorkerRegistry::new(Duration::from_secs(60)).unwrap();
@@ -752,10 +751,9 @@ mod tests {
         let state = WorkerApiState::new(queue, &db_path, registry, lease);
 
         let mut claim = request("POST", "/v1/claim");
-        claim.headers.insert(
-            "x-worker-session".into(),
-            registration.session.session_id,
-        );
+        claim
+            .headers
+            .insert("x-worker-session".into(), registration.session.session_id);
         claim
             .headers
             .insert("x-worker-token".into(), "0".repeat(64));

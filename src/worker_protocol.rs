@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ndarray::{Array1, Array2};
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, TransactionBehavior};
 
 use crate::sync_queue::{DatabaseManager, QueueError, QueueResult};
 use crate::value::{Epsilon, LeaseDuration, WorkerKind};
@@ -72,7 +72,9 @@ impl WorkerRegistry {
         now: Instant,
     ) -> QueueResult<WorkerRegistration> {
         if worker_id.is_empty() {
-            return Err(QueueError::InvalidState("worker id must not be empty".into()));
+            return Err(QueueError::InvalidState(
+                "worker id must not be empty".into(),
+            ));
         }
         if capacity <= 0 {
             return Err(QueueError::InvalidState(
@@ -156,7 +158,10 @@ impl WorkerRegistry {
     fn active_sessions_at(&self, now: Instant) -> QueueResult<Vec<WorkerSession>> {
         let mut sessions = self.lock_sessions()?;
         sessions.retain(|_, entry| entry.expires_at > now);
-        Ok(sessions.values().map(|entry| entry.session.clone()).collect())
+        Ok(sessions
+            .values()
+            .map(|entry| entry.session.clone())
+            .collect())
     }
 
     fn lock_sessions(
@@ -215,9 +220,7 @@ impl WorkerCoordinator {
             dispatch_registered(&db_path, sessions, epsilon, lease_sec)
         })
         .await
-        .map_err(|error| {
-            QueueError::InvalidState(format!("worker dispatch join error: {error}"))
-        })?
+        .map_err(|error| QueueError::InvalidState(format!("worker dispatch join error: {error}")))?
     }
 }
 
@@ -355,14 +358,8 @@ fn dispatch_registered(
                     .map(|worker| worker.available_slots as f64 / total_available as f64)
                     .collect(),
             );
-            let plan = sinkhorn_knopp_log_domain(
-                &cost,
-                &row_supply,
-                &col_demand,
-                epsilon,
-                120,
-                1e-6,
-            );
+            let plan =
+                sinkhorn_knopp_log_domain(&cost, &row_supply, &col_demand, epsilon, 120, 1e-6);
             let capacities: Vec<i64> = workers
                 .iter()
                 .map(|worker| worker.available_slots)
@@ -420,8 +417,8 @@ fn constant_time_equal(left: &str, right: &str) -> bool {
     let length = left.len().max(right.len());
     let mut diff = left.len() ^ right.len();
     for index in 0..length {
-        diff |= (left.get(index).copied().unwrap_or(0)
-            ^ right.get(index).copied().unwrap_or(0)) as usize;
+        diff |= (left.get(index).copied().unwrap_or(0) ^ right.get(index).copied().unwrap_or(0))
+            as usize;
     }
     diff == 0
 }
@@ -563,7 +560,10 @@ fn sinkhorn_knopp_log_domain(
 
 fn round_transport_plan_bounded(plan: &Array2<f64>, capacities: &[i64]) -> Vec<i32> {
     let (n, m) = plan.dim();
-    let mut remaining: Vec<usize> = capacities.iter().map(|value| (*value).max(0) as usize).collect();
+    let mut remaining: Vec<usize> = capacities
+        .iter()
+        .map(|value| (*value).max(0) as usize)
+        .collect();
     let mut assignment = vec![-1; n];
     let mut assigned = vec![false; n];
     let mut candidates = Vec::with_capacity(n.saturating_mul(m));
@@ -576,12 +576,7 @@ fn round_transport_plan_bounded(plan: &Array2<f64>, capacities: &[i64]) -> Vec<i
             }
         }
     }
-    candidates.sort_by(|left, right| {
-        right
-            .0
-            .partial_cmp(&left.0)
-            .unwrap_or(Ordering::Equal)
-    });
+    candidates.sort_by(|left, right| right.0.partial_cmp(&left.0).unwrap_or(Ordering::Equal));
 
     for (_, task, worker) in candidates {
         if !assigned[task] && remaining[worker] > 0 {
@@ -665,43 +660,30 @@ mod tests {
         let queue = RobustSinkhornQueue::new(&db_path);
         queue.ensure_schema().unwrap();
         let cpu_1 = queue.enqueue_simple("cpu-1", "cpu", "cpu-secret").unwrap();
-        let cpu_2 = queue.enqueue_simple("cpu-2", "cpu", "cpu-secret-2").unwrap();
+        let cpu_2 = queue
+            .enqueue_simple("cpu-2", "cpu", "cpu-secret-2")
+            .unwrap();
         let gpu = queue.enqueue_simple("gpu-1", "gpu", "gpu-secret").unwrap();
 
         let registry = WorkerRegistry::new(Duration::from_secs(60)).unwrap();
         let gpu_registration = registry.register("gpu-worker", WorkerKind::Gpu, 1).unwrap();
-        let first = dispatch_registered(
-            &db_path,
-            registry.active_sessions().unwrap(),
-            1.5,
-            30.0,
-        )
-        .unwrap();
+        let first =
+            dispatch_registered(&db_path, registry.active_sessions().unwrap(), 1.5, 30.0).unwrap();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].task_id, gpu);
         assert_eq!(first[0].task_type, "gpu");
         assert_eq!(first[0].session_id, gpu_registration.session.session_id);
 
         let cpu_registration = registry.register("cpu-worker", WorkerKind::Cpu, 1).unwrap();
-        let second = dispatch_registered(
-            &db_path,
-            registry.active_sessions().unwrap(),
-            1.5,
-            30.0,
-        )
-        .unwrap();
+        let second =
+            dispatch_registered(&db_path, registry.active_sessions().unwrap(), 1.5, 30.0).unwrap();
         assert_eq!(second.len(), 1);
         assert!(second[0].task_id == cpu_1 || second[0].task_id == cpu_2);
         assert_eq!(second[0].task_type, "cpu");
         assert_eq!(second[0].session_id, cpu_registration.session.session_id);
 
-        let third = dispatch_registered(
-            &db_path,
-            registry.active_sessions().unwrap(),
-            1.5,
-            30.0,
-        )
-        .unwrap();
+        let third =
+            dispatch_registered(&db_path, registry.active_sessions().unwrap(), 1.5, 30.0).unwrap();
         assert!(third.is_empty());
 
         let remaining_cpu: i64 = DatabaseManager::execute_with_retry(&db_path, |conn| {
@@ -721,20 +703,16 @@ mod tests {
     #[test]
     fn registration_rejects_non_positive_capacity() {
         let registry = WorkerRegistry::new(Duration::from_secs(1)).unwrap();
-        assert!(registry
-            .register("worker", WorkerKind::Cpu, 0)
-            .is_err());
+        assert!(registry.register("worker", WorkerKind::Cpu, 0).is_err());
     }
 
     #[test]
     fn dispatch_ignores_unknown_or_unassigned_rows_when_calculating_load() {
-        let db_path = std::env::temp_dir().join(format!(
-            "worker_protocol_load_{}.db",
-            rand::random::<u64>()
-        ));
+        let db_path =
+            std::env::temp_dir().join(format!("worker_protocol_load_{}.db", rand::random::<u64>()));
         let queue = RobustSinkhornQueue::new(&db_path);
         queue.ensure_schema().unwrap();
-        queue.enqueue_simple("cpu", "cpu", "{}") .unwrap();
+        queue.enqueue_simple("cpu", "cpu", "{}").unwrap();
 
         let registry = WorkerRegistry::new(Duration::from_secs(60)).unwrap();
         let registration = registry.register("worker", WorkerKind::Cpu, 1).unwrap();
@@ -748,13 +726,8 @@ mod tests {
         })
         .unwrap();
 
-        let assigned = dispatch_registered(
-            &db_path,
-            registry.active_sessions().unwrap(),
-            1.5,
-            30.0,
-        )
-        .unwrap();
+        let assigned =
+            dispatch_registered(&db_path, registry.active_sessions().unwrap(), 1.5, 30.0).unwrap();
         assert_eq!(assigned.len(), 1);
 
         cleanup(&db_path);

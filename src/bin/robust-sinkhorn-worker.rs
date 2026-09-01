@@ -141,19 +141,13 @@ fn parse_serve_options(args: &[String]) -> Result<Command, String> {
                 index += 2;
             }
             "--session-ttl-ms" => {
-                session_ttl = Duration::from_millis(parse_positive_u64(
-                    args,
-                    index,
-                    "--session-ttl-ms",
-                )?);
+                session_ttl =
+                    Duration::from_millis(parse_positive_u64(args, index, "--session-ttl-ms")?);
                 index += 2;
             }
             "--task-lease-ms" => {
-                task_lease = Duration::from_millis(parse_positive_u64(
-                    args,
-                    index,
-                    "--task-lease-ms",
-                )?);
+                task_lease =
+                    Duration::from_millis(parse_positive_u64(args, index, "--task-lease-ms")?);
                 index += 2;
             }
             unknown => {
@@ -212,12 +206,8 @@ async fn run_serve(
     queue.ensure_schema().await?;
     let registry = WorkerRegistry::new(session_ttl)?;
     let task_lease = LeaseDuration::new(task_lease_duration)?;
-    let coordinator = WorkerCoordinator::new(
-        &db_path,
-        registry.clone(),
-        Epsilon::new(1.5)?,
-        task_lease,
-    );
+    let coordinator =
+        WorkerCoordinator::new(&db_path, registry.clone(), Epsilon::new(1.5)?, task_lease);
     let api_state = WorkerApiState::new(queue.clone(), &db_path, registry, task_lease);
 
     let listener = TcpListener::bind(listen_addr).await.map_err(|error| {
@@ -374,6 +364,13 @@ mod tests {
         assert!(parse_command(["serve", "--listen", "0.0.0.0:7332"]).is_err());
         assert!(parse_command(["serve", "--listen", "127.0.0.1:0"]).is_err());
         assert!(parse_command(["serve", "--dispatch-interval-ms", "0"]).is_err());
-        assert!(parse_command(["serve", "--session-ttl-ms", "1000", "--task-lease-ms", "2000"]).is_err());
+        assert!(parse_command([
+            "serve",
+            "--session-ttl-ms",
+            "1000",
+            "--task-lease-ms",
+            "2000"
+        ])
+        .is_err());
     }
 }
