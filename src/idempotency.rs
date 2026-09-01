@@ -228,8 +228,10 @@ mod tests {
             }));
         }
 
-        let results: Vec<IdempotentEnqueueResult> =
-            handles.into_iter().map(|handle| handle.join().unwrap()).collect();
+        let results: Vec<IdempotentEnqueueResult> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
         assert_eq!(
             results
                 .iter()
@@ -238,7 +240,8 @@ mod tests {
             1
         );
         assert!(results.iter().all(|result| match result {
-            IdempotentEnqueueResult::Created(id) | IdempotentEnqueueResult::Replayed(id) => *id == 1,
+            IdempotentEnqueueResult::Created(id) | IdempotentEnqueueResult::Replayed(id) =>
+                *id == 1,
             IdempotentEnqueueResult::Conflict => false,
         }));
 
@@ -247,7 +250,9 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))
             .unwrap();
         let key_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM task_idempotency", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM task_idempotency", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(task_count, 1);
         assert_eq!(key_count, 1);
