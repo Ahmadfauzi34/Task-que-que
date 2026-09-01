@@ -133,4 +133,4 @@ jobs:
           bun build src/worker.ts --target=bun --outdir=.check-dist
 
       - name: Prove public queue to reference worker flow
-        run: bash tests/reference-document-worker-smoke.sh
+        run: timeout 45s bash tests/reference-document-worker-smoke.sh
