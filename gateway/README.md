@@ -98,6 +98,46 @@ GATEWAY_ALLOW_UNAUTHENTICATED=1 explicit local-development bypass
 GATEWAY_UPSTREAM_TIMEOUT_MS  default 3000, bounded to 100..30000
 ```
 
+## Physical Termux proof
+
+CI proves the protocol on Linux, but Android execution is a separate proof obligation. After both `robust-sinkhorn-queue` and the project-scoped `task-queue-bun` launcher are installed, run the isolated physical-device smoke test from a repository checkout:
+
+```sh
+pkg install -y git curl
+cd "$HOME"
+
+git clone https://github.com/Ahmadfauzi34/Task-que-que.git 2>/dev/null || true
+cd Task-que-que
+git pull --ff-only
+
+sh gateway/tests/termux-smoke.sh
+```
+
+The smoke proof owns ports `127.0.0.1:7331` and `127.0.0.1:3000`. It refuses to run if an existing queue daemon or gateway is already serving on those ports, so it cannot accidentally pass by attaching to a stale process.
+
+It starts both processes with a temporary queue database, then proves:
+
+- Android ARM64 and `/system/bin/linker64`
+- the installed Rust queue binary executes
+- the installed Bun Android runtime executes
+- Rust readiness
+- Bun -> Rust combined readiness
+- unauthenticated task creation is rejected with HTTP 401
+- authenticated `document.process` enqueue reaches Rust/SQLite
+- the registry maps `document.process -> cpu`
+- task query does not disclose payload
+- SQLite state is actually created
+
+The temporary processes and database are removed on exit. The script does not replace the persistent production database.
+
+If commands live outside `PATH`, point the proof at exact binaries without changing its logic:
+
+```sh
+TASK_QUEUE_RUST_BIN="$HOME/.local/bin/robust-sinkhorn-queue" \
+TASK_QUEUE_BUN_BIN="$HOME/.local/bin/task-queue-bun" \
+sh gateway/tests/termux-smoke.sh
+```
+
 ## Public API
 
 Gateway liveness:
