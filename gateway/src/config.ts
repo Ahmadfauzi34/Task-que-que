@@ -4,12 +4,12 @@ export interface GatewayConfig {
   hostname: string;
   port: number;
   queueDaemonOrigin: string;
-  authMode: GatewayAuthMode;
+  authMode?: GatewayAuthMode;
   apiToken: string | null;
   allowUnauthenticated: boolean;
-  cloudflareAccessTeamDomain: string | null;
-  cloudflareAccessAudience: string | null;
-  cloudflareAccessServiceTokenClientId: string | null;
+  cloudflareAccessTeamDomain?: string | null;
+  cloudflareAccessAudience?: string | null;
+  cloudflareAccessServiceTokenClientId?: string | null;
   upstreamTimeoutMs: number;
   enqueueRatePerSecond: number;
   enqueueBurst: number;
