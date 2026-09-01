@@ -7,6 +7,7 @@ export interface GatewayConfig {
   upstreamTimeoutMs: number;
   enqueueRatePerSecond: number;
   enqueueBurst: number;
+  maxActiveTasks: number;
 }
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -15,6 +16,7 @@ const DEFAULT_QUEUE_DAEMON = "http://127.0.0.1:7331";
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 3_000;
 const DEFAULT_ENQUEUE_RATE_PER_SECOND = 10;
 const DEFAULT_ENQUEUE_BURST = 20;
+const DEFAULT_MAX_ACTIVE_TASKS = 256;
 
 function parseBoundedInteger(
   raw: string | undefined,
@@ -86,6 +88,13 @@ export function loadGatewayConfig(
     100_000,
     "GATEWAY_ENQUEUE_BURST",
   );
+  const maxActiveTasks = parseBoundedInteger(
+    env.GATEWAY_MAX_ACTIVE_TASKS,
+    DEFAULT_MAX_ACTIVE_TASKS,
+    1,
+    1_000_000,
+    "GATEWAY_MAX_ACTIVE_TASKS",
+  );
 
   const allowUnauthenticated = env.GATEWAY_ALLOW_UNAUTHENTICATED === "1";
   const apiToken = env.GATEWAY_API_TOKEN?.trim() || null;
@@ -107,5 +116,6 @@ export function loadGatewayConfig(
     upstreamTimeoutMs,
     enqueueRatePerSecond,
     enqueueBurst,
+    maxActiveTasks,
   };
 }
