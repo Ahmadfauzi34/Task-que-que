@@ -141,6 +141,44 @@ describe("remote agent invocation", () => {
     expect(redirectedCalls).toBe(0);
   });
 
+  test("keeps timeout active while reading the full response body", async () => {
+    const encoder = new TextEncoder();
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        let stage = 0;
+        const body = new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            if (stage === 0) {
+              stage = 1;
+              controller.enqueue(encoder.encode('{"result":"'));
+              return;
+            }
+            if (stage === 1) {
+              stage = 2;
+              await new Promise((resolve) => setTimeout(resolve, 300));
+              controller.enqueue(encoder.encode('late"}'));
+              controller.close();
+            }
+          },
+        });
+        return new Response(body, {
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+    servers.push(server);
+
+    await expect(
+      invokeRemoteAgent(8, JSON.stringify({ input: "x" }), {
+        endpoint: `http://127.0.0.1:${server.port}/invoke`,
+        providerId: "timeout-test",
+        timeoutMs: 100,
+      }),
+    ).rejects.toThrow();
+  });
+
   test("rejects oversized remote responses before persisting them", async () => {
     const server = Bun.serve({
       hostname: "127.0.0.1",
