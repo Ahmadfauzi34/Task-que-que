@@ -64,16 +64,50 @@ unauthorized_status="$(
 )"
 test "$unauthorized_status" = "401"
 
+missing_key_status="$(
+  curl -sS -o "$TMP_DIR/missing-key.json" -w '%{http_code}' \
+    -X POST http://127.0.0.1:3000/v1/tasks \
+    -H 'Authorization: Bearer ci-gateway-secret' \
+    -H 'Content-Type: application/json' \
+    --data-binary '{"type":"document.process","payload":{"document_id":"missing-key"}}'
+)"
+test "$missing_key_status" = "400"
+
+IDEMPOTENCY_KEY="ci-e2e-request-1"
+TASK_BODY='{"type":"document.process","payload":{"document_id":"e2e"},"priority":10,"max_retries":3}'
+
 created="$(
   curl -fsS -X POST http://127.0.0.1:3000/v1/tasks \
     -H 'Authorization: Bearer ci-gateway-secret' \
     -H 'Content-Type: application/json' \
-    --data-binary '{"type":"document.process","payload":{"document_id":"e2e"},"priority":10,"max_retries":3}'
+    -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+    --data-binary "$TASK_BODY"
 )"
 printf '%s' "$created" | grep -F '"status":"PENDING"' >/dev/null
+printf '%s' "$created" | grep -F '"replayed":false' >/dev/null
 
 TASK_ID="$(printf '%s' "$created" | sed -n 's/.*"task_id":\([0-9][0-9]*\).*/\1/p')"
 test -n "$TASK_ID"
+
+replayed="$(
+  curl -fsS -X POST http://127.0.0.1:3000/v1/tasks \
+    -H 'Authorization: Bearer ci-gateway-secret' \
+    -H 'Content-Type: application/json' \
+    -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+    --data-binary "$TASK_BODY"
+)"
+printf '%s' "$replayed" | grep -F "\"task_id\":$TASK_ID" >/dev/null
+printf '%s' "$replayed" | grep -F '"replayed":true' >/dev/null
+
+conflict_status="$(
+  curl -sS -o "$TMP_DIR/conflict.json" -w '%{http_code}' \
+    -X POST http://127.0.0.1:3000/v1/tasks \
+    -H 'Authorization: Bearer ci-gateway-secret' \
+    -H 'Content-Type: application/json' \
+    -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+    --data-binary '{"type":"document.process","payload":{"document_id":"different"},"priority":10,"max_retries":3}'
+)"
+test "$conflict_status" = "409"
 
 snapshot="$(
   curl -fsS "http://127.0.0.1:3000/v1/tasks/$TASK_ID" \
@@ -88,4 +122,10 @@ if printf '%s' "$snapshot" | grep -F '"payload"' >/dev/null; then
   exit 1
 fi
 
-echo "Bun -> Rust localhost API integration: OK (task_id=$TASK_ID)"
+if curl -fsS "http://127.0.0.1:3000/v1/tasks/2" \
+  -H 'Authorization: Bearer ci-gateway-secret' >/dev/null 2>&1; then
+  echo "idempotency replay unexpectedly created task 2" >&2
+  exit 1
+fi
+
+echo "Bun -> Rust idempotent localhost integration: OK (task_id=$TASK_ID)"

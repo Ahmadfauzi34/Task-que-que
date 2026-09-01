@@ -5,12 +5,16 @@ export interface GatewayConfig {
   apiToken: string | null;
   allowUnauthenticated: boolean;
   upstreamTimeoutMs: number;
+  enqueueRatePerSecond: number;
+  enqueueBurst: number;
 }
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 3000;
 const DEFAULT_QUEUE_DAEMON = "http://127.0.0.1:7331";
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 3_000;
+const DEFAULT_ENQUEUE_RATE_PER_SECOND = 10;
+const DEFAULT_ENQUEUE_BURST = 20;
 
 function parseBoundedInteger(
   raw: string | undefined,
@@ -68,6 +72,20 @@ export function loadGatewayConfig(
     30_000,
     "GATEWAY_UPSTREAM_TIMEOUT_MS",
   );
+  const enqueueRatePerSecond = parseBoundedInteger(
+    env.GATEWAY_ENQUEUE_RATE_PER_SECOND,
+    DEFAULT_ENQUEUE_RATE_PER_SECOND,
+    1,
+    10_000,
+    "GATEWAY_ENQUEUE_RATE_PER_SECOND",
+  );
+  const enqueueBurst = parseBoundedInteger(
+    env.GATEWAY_ENQUEUE_BURST,
+    DEFAULT_ENQUEUE_BURST,
+    1,
+    100_000,
+    "GATEWAY_ENQUEUE_BURST",
+  );
 
   const allowUnauthenticated = env.GATEWAY_ALLOW_UNAUTHENTICATED === "1";
   const apiToken = env.GATEWAY_API_TOKEN?.trim() || null;
@@ -87,5 +105,7 @@ export function loadGatewayConfig(
     apiToken,
     allowUnauthenticated,
     upstreamTimeoutMs,
+    enqueueRatePerSecond,
+    enqueueBurst,
   };
 }

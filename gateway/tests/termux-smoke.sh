@@ -10,6 +10,7 @@ BUN_LOG="$TMP_DIR/gateway.log"
 RUST_BIN="${TASK_QUEUE_RUST_BIN:-robust-sinkhorn-queue}"
 BUN_BIN="${TASK_QUEUE_BUN_BIN:-task-queue-bun}"
 TOKEN="termux-smoke-local-only-$$"
+IDEMPOTENCY_KEY="termux-physical-proof-$$"
 
 print_logs() {
   if [ -s "$RUST_LOG" ]; then
@@ -112,7 +113,11 @@ kill -0 "$RUST_PID" >/dev/null 2>&1 || fail "Rust queue daemon exited after read
 
 (
   cd "$ROOT_DIR/gateway"
-  exec env GATEWAY_API_TOKEN="$TOKEN" "$BUN_BIN" run src/server.ts
+  exec env \
+    GATEWAY_API_TOKEN="$TOKEN" \
+    GATEWAY_ENQUEUE_RATE_PER_SECOND=10000 \
+    GATEWAY_ENQUEUE_BURST=100000 \
+    "$BUN_BIN" run src/server.ts
 ) >"$BUN_LOG" 2>&1 &
 BUN_PID=$!
 wait_for_url "http://127.0.0.1:3000/readyz" "$BUN_LOG" || fail "Bun gateway readiness failed"
@@ -135,16 +140,48 @@ unauthorized_status="$(
 )"
 [ "$unauthorized_status" = "401" ] || fail "unauthorized create returned HTTP $unauthorized_status instead of 401"
 
+missing_key_status="$(
+  curl -sS -o "$TMP_DIR/missing-key.json" -w '%{http_code}' \
+    -X POST http://127.0.0.1:3000/v1/tasks \
+    -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' \
+    --data-binary '{"type":"document.process","payload":{"document_id":"missing-key"}}'
+)"
+[ "$missing_key_status" = "400" ] || fail "missing Idempotency-Key returned HTTP $missing_key_status instead of 400"
+
+TASK_BODY='{"type":"document.process","payload":{"document_id":"termux-physical-proof"},"priority":10,"max_retries":3}'
 created="$(
   curl -fsS -X POST http://127.0.0.1:3000/v1/tasks \
     -H "Authorization: Bearer $TOKEN" \
     -H 'Content-Type: application/json' \
-    --data-binary '{"type":"document.process","payload":{"document_id":"termux-physical-proof"},"priority":10,"max_retries":3}'
+    -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+    --data-binary "$TASK_BODY"
 )"
 printf '%s' "$created" | grep -F '"status":"PENDING"' >/dev/null || fail "authorized task was not accepted as PENDING"
+printf '%s' "$created" | grep -F '"replayed":false' >/dev/null || fail "first idempotent enqueue was not marked created"
 
 TASK_ID="$(printf '%s' "$created" | sed -n 's/.*"task_id":\([0-9][0-9]*\).*/\1/p')"
 [ -n "$TASK_ID" ] || fail "could not extract task_id from create response"
+
+replayed="$(
+  curl -fsS -X POST http://127.0.0.1:3000/v1/tasks \
+    -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' \
+    -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+    --data-binary "$TASK_BODY"
+)"
+printf '%s' "$replayed" | grep -F "\"task_id\":$TASK_ID" >/dev/null || fail "idempotency replay returned a different task id"
+printf '%s' "$replayed" | grep -F '"replayed":true' >/dev/null || fail "idempotency replay was not marked replayed"
+
+conflict_status="$(
+  curl -sS -o "$TMP_DIR/conflict.json" -w '%{http_code}' \
+    -X POST http://127.0.0.1:3000/v1/tasks \
+    -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' \
+    -H "Idempotency-Key: $IDEMPOTENCY_KEY" \
+    --data-binary '{"type":"document.process","payload":{"document_id":"changed"},"priority":10,"max_retries":3}'
+)"
+[ "$conflict_status" = "409" ] || fail "idempotency conflict returned HTTP $conflict_status instead of 409"
 
 snapshot="$(
   curl -fsS "http://127.0.0.1:3000/v1/tasks/$TASK_ID" \
@@ -158,6 +195,11 @@ if printf '%s' "$snapshot" | grep -F '"payload"' >/dev/null; then
   fail "public task snapshot leaked payload"
 fi
 
+if curl -fsS "http://127.0.0.1:3000/v1/tasks/2" \
+  -H "Authorization: Bearer $TOKEN" >/dev/null 2>&1; then
+  fail "idempotency replay unexpectedly created a second task"
+fi
+
 [ -s "$TMP_DIR/queue.db" ] || fail "SQLite queue database was not created"
 
 printf '\nProof state\n'
@@ -166,8 +208,11 @@ printf 'Rust daemon readiness        : OK\n'
 printf 'Bun Android execution        : OK\n'
 printf 'Bun -> Rust readiness        : OK\n'
 printf 'unauthorized create -> 401   : OK\n'
+printf 'Idempotency-Key required     : OK\n'
 printf 'authorized enqueue           : OK (task_id=%s)\n' "$TASK_ID"
+printf 'durable idempotency replay   : OK (same task_id)\n'
+printf 'idempotency conflict -> 409  : OK\n'
 printf 'registry mapping             : OK (document.process -> cpu)\n'
 printf 'public payload non-disclosure: OK\n'
 printf 'SQLite persistence path      : OK\n'
-printf '\nTermux Bun -> Rust localhost integration: OK\n'
+printf '\nTermux Bun -> Rust idempotent integration: OK\n'

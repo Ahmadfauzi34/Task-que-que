@@ -1,8 +1,13 @@
+import { TokenBucketAdmissionController } from "./admission";
 import { handleRequest, MAX_PUBLIC_REQUEST_BYTES } from "./app";
 import { loadGatewayConfig } from "./config";
 import { TASK_REGISTRY } from "./registry";
 
 const config = loadGatewayConfig();
+const admissionController = new TokenBucketAdmissionController(
+  config.enqueueRatePerSecond,
+  config.enqueueBurst,
+);
 
 const server = Bun.serve({
   hostname: config.hostname,
@@ -13,6 +18,7 @@ const server = Bun.serve({
     return handleRequest(request, {
       config,
       registry: TASK_REGISTRY,
+      admissionController,
     });
   },
   error(error) {
@@ -32,4 +38,5 @@ console.log(`listen : http://${config.hostname}:${server.port}`);
 console.log(`queue  : ${config.queueDaemonOrigin}`);
 console.log(`auth   : ${config.allowUnauthenticated ? "explicitly disabled" : "bearer token required"}`);
 console.log(`tasks  : ${Object.keys(TASK_REGISTRY).join(", ") || "none"}`);
+console.log(`enqueue: ${config.enqueueRatePerSecond}/s, burst ${config.enqueueBurst}`);
 console.log("status : ready");
