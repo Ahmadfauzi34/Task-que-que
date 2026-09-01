@@ -74,7 +74,8 @@ async function authenticateRequest(
     return { source: "anonymous", scope: "anonymous-local-development" };
   }
 
-  if (config.authMode === "bearer") {
+  const authMode = config.authMode ?? "bearer";
+  if (authMode === "bearer") {
     if (!config.apiToken) {
       return errorResponse(503, "auth_misconfigured", "gateway authentication is unavailable");
     }
