@@ -58,13 +58,16 @@ impl TerminalRetentionStore {
             let fences_exist = table_exists(&tx, "task_lease_fences")?;
             let results_exist = table_exists(&tx, "task_results")?;
 
-            let terminal_filter = "status IN ('COMPLETED', 'FAILED', 'CANCELLED')";
-
             let pruned_idempotency = if idempotency_exists {
                 tx.execute(
-                    &format!(
-                        "DELETE FROM task_idempotency\n                         WHERE task_id IN (\n                             SELECT id\n                             FROM tasks\n                             WHERE {terminal_filter}\n                             ORDER BY updated_at ASC, id ASC\n                             LIMIT ?1\n                         )"
-                    ),
+                    "DELETE FROM task_idempotency
+                     WHERE task_id IN (
+                         SELECT id
+                         FROM tasks
+                         WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+                         ORDER BY updated_at ASC, id ASC
+                         LIMIT ?1
+                     )",
                     params![prune_count],
                 )? as i64
             } else {
@@ -73,9 +76,14 @@ impl TerminalRetentionStore {
 
             let pruned_fences = if fences_exist {
                 tx.execute(
-                    &format!(
-                        "DELETE FROM task_lease_fences\n                         WHERE task_id IN (\n                             SELECT id\n                             FROM tasks\n                             WHERE {terminal_filter}\n                             ORDER BY updated_at ASC, id ASC\n                             LIMIT ?1\n                         )"
-                    ),
+                    "DELETE FROM task_lease_fences
+                     WHERE task_id IN (
+                         SELECT id
+                         FROM tasks
+                         WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+                         ORDER BY updated_at ASC, id ASC
+                         LIMIT ?1
+                     )",
                     params![prune_count],
                 )? as i64
             } else {
@@ -84,9 +92,14 @@ impl TerminalRetentionStore {
 
             let pruned_results = if results_exist {
                 tx.execute(
-                    &format!(
-                        "DELETE FROM task_results\n                         WHERE task_id IN (\n                             SELECT id\n                             FROM tasks\n                             WHERE {terminal_filter}\n                             ORDER BY updated_at ASC, id ASC\n                             LIMIT ?1\n                         )"
-                    ),
+                    "DELETE FROM task_results
+                     WHERE task_id IN (
+                         SELECT id
+                         FROM tasks
+                         WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+                         ORDER BY updated_at ASC, id ASC
+                         LIMIT ?1
+                     )",
                     params![prune_count],
                 )? as i64
             } else {
@@ -94,9 +107,15 @@ impl TerminalRetentionStore {
             };
 
             let pruned_tasks = tx.execute(
-                &format!(
-                    "DELETE FROM tasks\n                     WHERE id IN (\n                         SELECT id\n                         FROM tasks\n                         WHERE {terminal_filter}\n                         ORDER BY updated_at ASC, id ASC\n                         LIMIT ?1\n                     )\n                       AND {terminal_filter}"
-                ),
+                "DELETE FROM tasks
+                 WHERE id IN (
+                     SELECT id
+                     FROM tasks
+                     WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+                     ORDER BY updated_at ASC, id ASC
+                     LIMIT ?1
+                 )
+                   AND status IN ('COMPLETED', 'FAILED', 'CANCELLED')",
                 params![prune_count],
             )? as i64;
 
