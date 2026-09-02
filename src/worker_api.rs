@@ -17,6 +17,8 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = MAX_RESULT_PROJECTION_BYTES;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_WORKER_CAPACITY: i64 = 1_000_000;
+const MAX_WORKER_TASK_NAMES: usize = 32;
+const MAX_WORKER_TASK_HEADER_BYTES: usize = 4096;
 
 #[derive(Clone)]
 pub struct WorkerApiState {
@@ -312,11 +314,17 @@ async fn route_register(request: Request, state: WorkerApiState) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
+    let task_names = match parse_worker_task_names(&request.headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
 
-    match state
-        .registry
-        .register(worker_id, WorkerKind::from_db(&worker_type), capacity)
-    {
+    match state.registry.register(
+        worker_id,
+        WorkerKind::from_db(&worker_type),
+        capacity,
+        task_names,
+    ) {
         Ok(registration) => Response::json(
             201,
             "Created",
@@ -326,7 +334,7 @@ async fn route_register(request: Request, state: WorkerApiState) -> Response {
                 state.task_lease.value(),
             ),
         ),
-        Err(error) => Response::error(500, "Internal Server Error", &error.to_string()),
+        Err(error) => Response::error(400, "Bad Request", &error.to_string()),
     }
 }
 
@@ -616,6 +624,55 @@ fn parse_bounded_i64_header(
     }
 }
 
+fn parse_worker_task_names(headers: &HashMap<String, String>) -> Result<Vec<String>, Response> {
+    let raw = required_header(headers, "x-worker-tasks")?;
+    if raw.len() > MAX_WORKER_TASK_HEADER_BYTES {
+        return Err(Response::error(
+            400,
+            "Bad Request",
+            "x-worker-tasks exceeds bounded header size",
+        ));
+    }
+    let mut task_names = Vec::new();
+    for value in raw.split(',') {
+        let task_name = value.trim();
+        if let Err(message) = validate_task_name(task_name) {
+            return Err(Response::error(400, "Bad Request", &message));
+        }
+        task_names.push(task_name.to_string());
+    }
+    if task_names.is_empty() || task_names.len() > MAX_WORKER_TASK_NAMES {
+        return Err(Response::error(
+            400,
+            "Bad Request",
+            "x-worker-tasks must advertise between 1 and 32 exact task names",
+        ));
+    }
+    task_names.sort();
+    if task_names.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(Response::error(
+            400,
+            "Bad Request",
+            "x-worker-tasks must not contain duplicates",
+        ));
+    }
+    Ok(task_names)
+}
+
+fn validate_task_name(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 128 {
+        return Err("worker task name length must be between 1 and 128".into());
+    }
+    if !value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':')
+    }) {
+        return Err(
+            "worker task names may contain only ASCII alphanumeric characters and . _ - :".into(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_identifier(value: &str, max_len: usize, field: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > max_len {
         return Err(format!("{field} length must be between 1 and {max_len}"));
@@ -631,12 +688,20 @@ fn validate_identifier(value: &str, max_len: usize, field: &str) -> Result<(), S
 }
 
 fn registration_json(registration: &WorkerRegistration, ttl: Duration, lease: Duration) -> String {
+    let task_names = registration
+        .session
+        .task_names
+        .iter()
+        .map(|task_name| format!("\"{}\"", json_escape(task_name)))
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
         concat!(
             "{{",
             "\"worker_id\":\"{}\",",
             "\"worker_type\":\"{}\",",
             "\"capacity\":{},",
+            "\"task_names\":[{}],",
             "\"session_id\":\"{}\",",
             "\"session_token\":\"{}\",",
             "\"session_ttl_ms\":{},",
@@ -646,6 +711,7 @@ fn registration_json(registration: &WorkerRegistration, ttl: Duration, lease: Du
         json_escape(&registration.session.worker_id),
         json_escape(&registration.session.kind.to_db()),
         registration.session.capacity,
+        task_names,
         json_escape(&registration.session.session_id),
         json_escape(&registration.session_token),
         ttl.as_millis(),
@@ -712,6 +778,10 @@ mod tests {
         }
     }
 
+    fn names(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
     fn credentials(request: &mut Request, registration: &WorkerRegistration) {
         request.headers.insert(
             "x-worker-session".into(),
@@ -720,6 +790,46 @@ mod tests {
         request
             .headers
             .insert("x-worker-token".into(), registration.session_token.clone());
+    }
+
+    #[tokio::test]
+    async fn registration_requires_bounded_exact_task_names() {
+        let db_path =
+            std::env::temp_dir().join(format!("worker_api_register_{}.db", rand::random::<u64>()));
+        let queue = AsyncRobustSinkhornQueue::new(&db_path);
+        queue.ensure_schema().await.unwrap();
+        let registry = WorkerRegistry::new(Duration::from_secs(60)).unwrap();
+        let lease = LeaseDuration::new(Duration::from_secs(30)).unwrap();
+        let state = WorkerApiState::new(queue, &db_path, registry.clone(), lease);
+
+        let mut missing = request("POST", "/v1/register");
+        missing.headers.insert("x-worker-id".into(), "worker-a".into());
+        missing.headers.insert("x-worker-type".into(), "cpu".into());
+        missing
+            .headers
+            .insert("x-worker-capacity".into(), "1".into());
+        assert_eq!(route(missing, state.clone()).await.status, 400);
+
+        let mut exact = request("POST", "/v1/register");
+        exact.headers.insert("x-worker-id".into(), "worker-a".into());
+        exact.headers.insert("x-worker-type".into(), "cpu".into());
+        exact
+            .headers
+            .insert("x-worker-capacity".into(), "1".into());
+        exact.headers.insert(
+            "x-worker-tasks".into(),
+            "hash.compute,document.process".into(),
+        );
+        let response = route(exact, state).await;
+        assert_eq!(response.status, 201);
+        assert!(response
+            .body
+            .contains("\"task_names\":[\"document.process\",\"hash.compute\"]"));
+        let sessions = registry.active_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].task_names, names(&["document.process", "hash.compute"]));
+
+        let _ = std::fs::remove_file(&db_path);
     }
 
     #[tokio::test]
@@ -741,7 +851,14 @@ mod tests {
 
         let registry = WorkerRegistry::new(Duration::from_secs(60)).unwrap();
         let lease = LeaseDuration::new(Duration::from_secs(30)).unwrap();
-        let registration = registry.register("worker-a", WorkerKind::Cpu, 1).unwrap();
+        let registration = registry
+            .register(
+                "worker-a",
+                WorkerKind::Cpu,
+                1,
+                names(&["document.process"]),
+            )
+            .unwrap();
         let coordinator = WorkerCoordinator::new(
             &db_path,
             registry.clone(),
@@ -761,7 +878,9 @@ mod tests {
 
         let mut stale_complete = request("POST", "/v1/task/complete");
         credentials(&mut stale_complete, &registration);
-        stale_complete.headers.insert("x-task-id".into(), "1".into());
+        stale_complete
+            .headers
+            .insert("x-task-id".into(), "1".into());
         stale_complete
             .headers
             .insert("x-lease-generation".into(), "2".into());
@@ -778,9 +897,10 @@ mod tests {
         complete
             .headers
             .insert("x-lease-generation".into(), "1".into());
-        complete
-            .headers
-            .insert("content-type".into(), "application/json; charset=utf-8".into());
+        complete.headers.insert(
+            "content-type".into(),
+            "application/json; charset=utf-8".into(),
+        );
         complete.body = br#"{"digest":"abc"}"#.to_vec();
         assert_eq!(route(complete, state).await.status, 200);
 
@@ -813,7 +933,9 @@ mod tests {
 
         let registry = WorkerRegistry::new(Duration::from_secs(60)).unwrap();
         let lease = LeaseDuration::new(Duration::from_secs(30)).unwrap();
-        let registration = registry.register("worker-legacy", WorkerKind::Cpu, 1).unwrap();
+        let registration = registry
+            .register("worker-legacy", WorkerKind::Cpu, 1, names(&["legacy.task"]))
+            .unwrap();
         let coordinator = WorkerCoordinator::new(
             &db_path,
             registry.clone(),
@@ -851,7 +973,14 @@ mod tests {
         queue.ensure_schema().await.unwrap();
         let registry = WorkerRegistry::new(Duration::from_secs(60)).unwrap();
         let lease = LeaseDuration::new(Duration::from_secs(30)).unwrap();
-        let registration = registry.register("worker-a", WorkerKind::Cpu, 1).unwrap();
+        let registration = registry
+            .register(
+                "worker-a",
+                WorkerKind::Cpu,
+                1,
+                names(&["document.process"]),
+            )
+            .unwrap();
         let state = WorkerApiState::new(queue, &db_path, registry, lease);
 
         let mut complete = request("POST", "/v1/task/complete");
@@ -874,7 +1003,14 @@ mod tests {
         queue.ensure_schema().await.unwrap();
         let registry = WorkerRegistry::new(Duration::from_secs(60)).unwrap();
         let lease = LeaseDuration::new(Duration::from_secs(30)).unwrap();
-        let registration = registry.register("worker-a", WorkerKind::Cpu, 1).unwrap();
+        let registration = registry
+            .register(
+                "worker-a",
+                WorkerKind::Cpu,
+                1,
+                names(&["document.process"]),
+            )
+            .unwrap();
         let state = WorkerApiState::new(queue, &db_path, registry, lease);
 
         let mut claim = request("POST", "/v1/claim");
