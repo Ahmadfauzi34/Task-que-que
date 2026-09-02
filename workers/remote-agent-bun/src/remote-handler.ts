@@ -185,6 +185,7 @@ export async function invokeRemoteAgent(
   taskId: number,
   rawPayload: string,
   rawConfig: RemoteAgentConfig,
+  cancellationSignal?: AbortSignal,
 ): Promise<RemoteAgentResult> {
   if (!Number.isSafeInteger(taskId) || taskId <= 0) {
     throw new Error("task id must be a positive safe integer");
@@ -192,6 +193,12 @@ export async function invokeRemoteAgent(
   const invocation = parseRemoteAgentInvocation(rawPayload);
   const config = validateRemoteAgentConfig(rawConfig);
   const controller = new AbortController();
+  const abortFromCancellation = () => controller.abort(cancellationSignal?.reason);
+  if (cancellationSignal?.aborted) {
+    abortFromCancellation();
+  } else {
+    cancellationSignal?.addEventListener("abort", abortFromCancellation, { once: true });
+  }
   const timer = setTimeout(() => controller.abort(), config.timeoutMs);
 
   const headers: Record<string, string> = {
@@ -240,6 +247,7 @@ export async function invokeRemoteAgent(
     );
   } finally {
     clearTimeout(timer);
+    cancellationSignal?.removeEventListener("abort", abortFromCancellation);
   }
 }
 
@@ -275,7 +283,12 @@ export function createRemoteAgentHandler(config: RemoteAgentConfig): WorkerHandl
     taskType: "remote-agent",
 
     async handle(task: RegistryTask, context) {
-      const result = await invokeRemoteAgent(task.task_id, task.payload, validated);
+      const result = await invokeRemoteAgent(
+        task.task_id,
+        task.payload,
+        validated,
+        context.signal,
+      );
       await writeRemoteAgentResultAtomic(context.outputDir, result);
       return result;
     },

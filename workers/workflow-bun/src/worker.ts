@@ -53,6 +53,40 @@ function normalizeLoopbackOrigin(raw: string, name: string): string {
   return url.origin;
 }
 
+function cancellationAwareFetch(
+  fetchImpl: typeof fetch | undefined,
+  taskSignal: AbortSignal,
+): typeof fetch {
+  const base = fetchImpl ?? fetch;
+  return (async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    if (taskSignal.aborted) {
+      throw taskSignal.reason ?? new DOMException("operation aborted", "AbortError");
+    }
+
+    const controller = new AbortController();
+    const callerSignal = init?.signal ?? undefined;
+    const abortFromTask = () => controller.abort(taskSignal.reason);
+    const abortFromCaller = () => controller.abort(callerSignal?.reason);
+
+    taskSignal.addEventListener("abort", abortFromTask, { once: true });
+    if (callerSignal?.aborted) {
+      abortFromCaller();
+    } else {
+      callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+    }
+
+    try {
+      return await base(input, { ...init, signal: controller.signal });
+    } finally {
+      taskSignal.removeEventListener("abort", abortFromTask);
+      callerSignal?.removeEventListener("abort", abortFromCaller);
+    }
+  }) as typeof fetch;
+}
+
 export function loadWorkflowWorkerConfig(
   env: Record<string, string | undefined> = process.env,
 ): WorkflowWorkerConfig {
@@ -125,10 +159,15 @@ export function createWorkflowWorkerRegistry(
     taskType: "workflow",
 
     async handle(task, context) {
+      const cancellableConfig: WorkflowGatewayConfig = {
+        ...validated,
+        fetchImpl: cancellationAwareFetch(validated.fetchImpl, context.signal),
+        resultFetchImpl: cancellationAwareFetch(validated.resultFetchImpl, context.signal),
+      };
       const result = await executeWorkflowWithDeclaredOutputs(
         task.task_id,
         task.payload,
-        validated,
+        cancellableConfig,
       );
       await writeWorkflowResultAtomic(context.outputDir, result);
       return result;
