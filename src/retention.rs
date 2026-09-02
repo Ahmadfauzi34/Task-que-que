@@ -36,7 +36,7 @@ impl TerminalRetentionStore {
         DatabaseManager::execute_with_retry(&self.db_path, move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let terminal_before: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM tasks WHERE status IN ('COMPLETED', 'FAILED')",
+                "SELECT COUNT(*) FROM tasks WHERE status IN ('COMPLETED', 'FAILED', 'CANCELLED')",
                 [],
                 |row| row.get(0),
             )?;
@@ -58,16 +58,13 @@ impl TerminalRetentionStore {
             let fences_exist = table_exists(&tx, "task_lease_fences")?;
             let results_exist = table_exists(&tx, "task_results")?;
 
+            let terminal_filter = "status IN ('COMPLETED', 'FAILED', 'CANCELLED')";
+
             let pruned_idempotency = if idempotency_exists {
                 tx.execute(
-                    "DELETE FROM task_idempotency
-                     WHERE task_id IN (
-                         SELECT id
-                         FROM tasks
-                         WHERE status IN ('COMPLETED', 'FAILED')
-                         ORDER BY updated_at ASC, id ASC
-                         LIMIT ?1
-                     )",
+                    &format!(
+                        "DELETE FROM task_idempotency\n                         WHERE task_id IN (\n                             SELECT id\n                             FROM tasks\n                             WHERE {terminal_filter}\n                             ORDER BY updated_at ASC, id ASC\n                             LIMIT ?1\n                         )"
+                    ),
                     params![prune_count],
                 )? as i64
             } else {
@@ -76,14 +73,9 @@ impl TerminalRetentionStore {
 
             let pruned_fences = if fences_exist {
                 tx.execute(
-                    "DELETE FROM task_lease_fences
-                     WHERE task_id IN (
-                         SELECT id
-                         FROM tasks
-                         WHERE status IN ('COMPLETED', 'FAILED')
-                         ORDER BY updated_at ASC, id ASC
-                         LIMIT ?1
-                     )",
+                    &format!(
+                        "DELETE FROM task_lease_fences\n                         WHERE task_id IN (\n                             SELECT id\n                             FROM tasks\n                             WHERE {terminal_filter}\n                             ORDER BY updated_at ASC, id ASC\n                             LIMIT ?1\n                         )"
+                    ),
                     params![prune_count],
                 )? as i64
             } else {
@@ -92,14 +84,9 @@ impl TerminalRetentionStore {
 
             let pruned_results = if results_exist {
                 tx.execute(
-                    "DELETE FROM task_results
-                     WHERE task_id IN (
-                         SELECT id
-                         FROM tasks
-                         WHERE status IN ('COMPLETED', 'FAILED')
-                         ORDER BY updated_at ASC, id ASC
-                         LIMIT ?1
-                     )",
+                    &format!(
+                        "DELETE FROM task_results\n                         WHERE task_id IN (\n                             SELECT id\n                             FROM tasks\n                             WHERE {terminal_filter}\n                             ORDER BY updated_at ASC, id ASC\n                             LIMIT ?1\n                         )"
+                    ),
                     params![prune_count],
                 )? as i64
             } else {
@@ -107,15 +94,9 @@ impl TerminalRetentionStore {
             };
 
             let pruned_tasks = tx.execute(
-                "DELETE FROM tasks
-                 WHERE id IN (
-                     SELECT id
-                     FROM tasks
-                     WHERE status IN ('COMPLETED', 'FAILED')
-                     ORDER BY updated_at ASC, id ASC
-                     LIMIT ?1
-                 )
-                   AND status IN ('COMPLETED', 'FAILED')",
+                &format!(
+                    "DELETE FROM tasks\n                     WHERE id IN (\n                         SELECT id\n                         FROM tasks\n                         WHERE {terminal_filter}\n                         ORDER BY updated_at ASC, id ASC\n                         LIMIT ?1\n                     )\n                       AND {terminal_filter}"
+                ),
                 params![prune_count],
             )? as i64;
 
@@ -293,6 +274,44 @@ mod tests {
         assert_eq!(second.pruned_tasks, 0);
         assert_eq!(second.pruned_results, 0);
         assert_eq!(second.retained_terminal, 2);
+
+        cleanup(&db_path);
+    }
+
+    #[test]
+    fn cancelled_rows_participate_in_terminal_retention() {
+        let db_path = temp_db("terminal_retention_cancelled");
+        RobustSinkhornQueue::new(&db_path).ensure_schema().unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        insert_task(&conn, 1, "CANCELLED", 1.0);
+        insert_task(&conn, 2, "COMPLETED", 2.0);
+        insert_task(&conn, 3, "PENDING", 0.5);
+        drop(conn);
+
+        let result = TerminalRetentionStore::new(&db_path)
+            .prune_to_max(1)
+            .unwrap();
+        assert_eq!(result.terminal_before, 2);
+        assert_eq!(result.retained_terminal, 1);
+        assert_eq!(result.pruned_tasks, 1);
+
+        let conn = Connection::open(&db_path).unwrap();
+        let cancelled_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'CANCELLED'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cancelled_count, 0);
+        let pending_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'PENDING'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending_count, 1);
 
         cleanup(&db_path);
     }
