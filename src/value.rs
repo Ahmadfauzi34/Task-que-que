@@ -292,6 +292,7 @@ pub enum TaskStatus {
     Running,
     Completed,
     Failed,
+    Cancelled,
 }
 
 impl TaskStatus {
@@ -302,6 +303,7 @@ impl TaskStatus {
             TaskStatus::Running => "RUNNING",
             TaskStatus::Completed => "COMPLETED",
             TaskStatus::Failed => "FAILED",
+            TaskStatus::Cancelled => "CANCELLED",
         }
     }
 
@@ -312,6 +314,7 @@ impl TaskStatus {
             "RUNNING" => Ok(TaskStatus::Running),
             "COMPLETED" => Ok(TaskStatus::Completed),
             "FAILED" => Ok(TaskStatus::Failed),
+            "CANCELLED" => Ok(TaskStatus::Cancelled),
             other => Err(QueueError::InvalidState(format!(
                 "unknown task status: {other}"
             ))),
