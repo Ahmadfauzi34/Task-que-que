@@ -40,6 +40,15 @@ function dependencies(fetchImpl: FetchLike) {
   return { config, registry: TASK_REGISTRY, admissionController: admission, fetchImpl };
 }
 
+function completedWorkflowSnapshot(taskId = 7): Response {
+  return Response.json({
+    id: taskId,
+    task_name: "workflow.run",
+    task_type: "workflow",
+    status: "COMPLETED",
+  });
+}
+
 describe("declared public workflow results", () => {
   test("requires the existing gateway bearer boundary", async () => {
     let calls = 0;
@@ -57,14 +66,7 @@ describe("declared public workflow results", () => {
   test("exports only the exact parent outputs object and topology", async () => {
     const fetchImpl: FetchLike = async (input) => {
       const path = new URL(String(input)).pathname;
-      if (path === "/v1/tasks/7") {
-        return Response.json({
-          id: 7,
-          task_name: "workflow.run",
-          task_type: "workflow",
-          status: "COMPLETED",
-        });
-      }
+      if (path === "/v1/tasks/7") return completedWorkflowSnapshot();
       if (path === "/v1/tasks/7/result") {
         return wrapper(7, {
           schema_version: 1,
@@ -92,6 +94,31 @@ describe("declared public workflow results", () => {
     expect(raw).not.toContain("lease_generation");
   });
 
+  test("keeps already persisted topology-only workflow results readable after upgrade", async () => {
+    const fetchImpl: FetchLike = async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/tasks/7") return completedWorkflowSnapshot();
+      if (path === "/v1/tasks/7/result") {
+        return wrapper(7, {
+          schema_version: 1,
+          workflow_task_id: 7,
+          status: "COMPLETED",
+          steps: [
+            { id: "legacy", type: "hash.compute", task_id: 8, status: "COMPLETED" },
+          ],
+        });
+      }
+      return new Response("not found", { status: 404 });
+    };
+    const response = await handleDeclaredWorkflowResultRequest(
+      request("/v1/workflows/7/result"),
+      dependencies(fetchImpl),
+    );
+    expect(response?.status).toBe(200);
+    const body = await response!.json() as Record<string, unknown>;
+    expect(body.outputs).toEqual({});
+  });
+
   test("fails closed on unexpected projection fields and unsafe output names", async () => {
     const projections = [
       {
@@ -110,9 +137,7 @@ describe("declared public workflow results", () => {
     for (const projection of projections) {
       const fetchImpl: FetchLike = async (input) => {
         const path = new URL(String(input)).pathname;
-        if (path === "/v1/tasks/7") {
-          return Response.json({ id: 7, task_name: "workflow.run", task_type: "workflow", status: "COMPLETED" });
-        }
+        if (path === "/v1/tasks/7") return completedWorkflowSnapshot();
         if (path === "/v1/tasks/7/result") return wrapper(7, projection);
         return new Response("not found", { status: 404 });
       };
