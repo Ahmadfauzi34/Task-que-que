@@ -7,11 +7,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+use crate::cancellation::CancellationOutcome;
 use crate::idempotency::{IdempotencyStore, IdempotentEnqueueResult};
 use crate::result_projection::{TaskResultProjection, TaskResultStore};
 use crate::task_query::{QueueMetricsSnapshot, TaskQueryStore, TaskSnapshot};
 use crate::tokio_queue::AsyncRobustSinkhornQueue;
-use crate::value::{EnqueueCommand, MaxRetries, Priority, TaskKind, TaskName, TaskPayload};
+use crate::value::{
+    EnqueueCommand, MaxRetries, Priority, TaskId, TaskKind, TaskName, TaskPayload,
+};
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -283,6 +286,12 @@ async fn route(request: Request, state: LocalApiState) -> Response {
     if request.method == "POST" && request.path == "/v1/tasks" {
         return route_enqueue(request, state).await;
     }
+    if request.method == "POST"
+        && request.path.starts_with("/v1/tasks/")
+        && request.path.ends_with("/cancel")
+    {
+        return route_cancel_task(request.path, state).await;
+    }
     if request.method == "GET"
         && request.path.starts_with("/v1/tasks/")
         && request.path.ends_with("/result")
@@ -445,6 +454,47 @@ async fn route_enqueue(request: Request, state: LocalApiState) -> Response {
             202,
             "Accepted",
             format!("{{\"task_id\":{},\"status\":\"PENDING\"}}", task_id.value()),
+        ),
+        Err(error) => Response::error(500, "Internal Server Error", &error.to_string()),
+    }
+}
+
+async fn route_cancel_task(path: String, state: LocalApiState) -> Response {
+    let id_text = match path
+        .strip_prefix("/v1/tasks/")
+        .and_then(|value| value.strip_suffix("/cancel"))
+    {
+        Some(value) if !value.is_empty() && !value.contains('/') => value,
+        _ => return Response::error(404, "Not Found", "task cancellation route not found"),
+    };
+
+    let task_id = match id_text.parse::<i64>() {
+        Ok(value) if value > 0 => value,
+        _ => return Response::error(400, "Bad Request", "task id must be a positive integer"),
+    };
+
+    match state.queue.cancel_task(TaskId::new(task_id)).await {
+        Ok(CancellationOutcome::Applied) => Response::json(
+            200,
+            "OK",
+            format!(
+                "{{\"task_id\":{task_id},\"status\":\"CANCELLED\",\"cancellation\":\"applied\"}}"
+            ),
+        ),
+        Ok(CancellationOutcome::Replayed) => Response::json(
+            200,
+            "OK",
+            format!(
+                "{{\"task_id\":{task_id},\"status\":\"CANCELLED\",\"cancellation\":\"replayed\"}}"
+            ),
+        ),
+        Ok(CancellationOutcome::NotFound) => {
+            Response::error(404, "Not Found", "task not found")
+        }
+        Ok(CancellationOutcome::Terminal(status)) => Response::error(
+            409,
+            "Conflict",
+            &format!("task is already terminal with status {}", status.as_str()),
         ),
         Err(error) => Response::error(500, "Internal Server Error", &error.to_string()),
     }
@@ -613,6 +663,7 @@ fn metrics_json(snapshot: &QueueMetricsSnapshot) -> String {
             "\"running\":{},",
             "\"completed\":{},",
             "\"failed\":{},",
+            "\"cancelled\":{},",
             "\"unknown\":{}",
             "}},",
             "\"pending\":{{",
@@ -634,6 +685,7 @@ fn metrics_json(snapshot: &QueueMetricsSnapshot) -> String {
         snapshot.running,
         snapshot.completed,
         snapshot.failed,
+        snapshot.cancelled,
         snapshot.unknown_status,
         snapshot.pending_runnable,
         snapshot.pending_delayed,
@@ -843,10 +895,53 @@ mod tests {
         assert_eq!(metrics.status, 200);
         assert!(metrics.body.contains("\"total_tasks\":1"));
         assert!(metrics.body.contains("\"runnable\":1"));
+        assert!(metrics.body.contains("\"cancelled\":0"));
         assert!(metrics.body.contains("\"expired\":0"));
         assert!(!metrics.body.contains("document.process"));
         assert!(!metrics.body.contains("document_id"));
         assert!(!metrics.body.contains("abc"));
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_route_is_terminal_and_idempotent() {
+        let db_path =
+            std::env::temp_dir().join(format!("local_api_cancel_{}.db", rand::random::<u64>()));
+        let queue = AsyncRobustSinkhornQueue::new(&db_path);
+        queue.ensure_schema().await.unwrap();
+        queue
+            .enqueue(EnqueueCommand {
+                name: TaskName::new("workflow.run"),
+                kind: TaskKind::Other("workflow".into()),
+                payload: TaskPayload::new("{}"),
+                priority: Priority::new(0),
+                max_retries: MaxRetries::new(3).unwrap(),
+            })
+            .await
+            .unwrap();
+        let state = LocalApiState::new(queue, &db_path);
+
+        let cancelled = route(request("POST", "/v1/tasks/1/cancel"), state.clone()).await;
+        assert_eq!(cancelled.status, 200);
+        assert!(cancelled.body.contains("\"status\":\"CANCELLED\""));
+        assert!(cancelled.body.contains("\"cancellation\":\"applied\""));
+
+        let replayed = route(request("POST", "/v1/tasks/1/cancel"), state.clone()).await;
+        assert_eq!(replayed.status, 200);
+        assert!(replayed.body.contains("\"cancellation\":\"replayed\""));
+
+        let fetched = route(request("GET", "/v1/tasks/1"), state.clone()).await;
+        assert_eq!(fetched.status, 200);
+        assert!(fetched.body.contains("\"status\":\"CANCELLED\""));
+        assert!(fetched.body.contains("\"lease_generation\":1"));
+
+        let metrics = route(request("GET", "/metricsz"), state).await;
+        assert_eq!(metrics.status, 200);
+        assert!(metrics.body.contains("\"cancelled\":1"));
+        assert!(metrics.body.contains("\"unknown\":0"));
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
