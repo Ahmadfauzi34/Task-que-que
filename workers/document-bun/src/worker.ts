@@ -23,6 +23,7 @@ interface Registration {
   worker_id: string;
   worker_type: string;
   capacity: number;
+  task_names: string[];
   session_id: string;
   session_token: string;
   session_ttl_ms: number;
@@ -221,13 +222,14 @@ async function register(
   config: WorkerConfig,
   registry: WorkerHandlerRegistry,
 ): Promise<Registration> {
+  const advertisedTaskNames = registry.taskNames;
   const response = await workerRequest(config, "/v1/register", {
     method: "POST",
     headers: {
       "X-Worker-Id": config.workerId,
       "X-Worker-Type": registry.workerType,
       "X-Worker-Capacity": String(config.capacity),
-      "X-Worker-Tasks": registry.taskNames.join(","),
+      "X-Worker-Tasks": advertisedTaskNames.join(","),
     },
   });
   const registration = await responseJson<Registration>(response);
@@ -235,6 +237,9 @@ async function register(
   if (
     registration.worker_id !== config.workerId ||
     registration.worker_type !== registry.workerType ||
+    !Array.isArray(registration.task_names) ||
+    registration.task_names.length !== advertisedTaskNames.length ||
+    registration.task_names.some((taskName, index) => taskName !== advertisedTaskNames[index]) ||
     !/^[0-9a-f]{32}$/i.test(registration.session_id) ||
     !/^[0-9a-f]{64}$/i.test(registration.session_token) ||
     !Number.isSafeInteger(registration.session_ttl_ms) ||
