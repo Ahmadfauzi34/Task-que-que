@@ -100,9 +100,11 @@ json_number() {
 post_register() {
   worker_id="$1"
   worker_type="$2"
+  worker_tasks="$3"
   curl -fsS --max-time 5 -X POST http://127.0.0.1:7332/v1/register \
     -H "X-Worker-Id: $worker_id" \
     -H "X-Worker-Type: $worker_type" \
+    -H "X-Worker-Tasks: $worker_tasks" \
     -H 'X-Worker-Capacity: 1'
 }
 
@@ -174,6 +176,12 @@ control_register_status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST http:
 worker_enqueue_status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7332/v1/tasks)"
 [ "$worker_enqueue_status" = "404" ] || fail "worker data-plane unexpectedly exposed enqueue"
 
+missing_tasks_registration_status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7332/v1/register \
+  -H 'X-Worker-Id: missing-tasks-worker' \
+  -H 'X-Worker-Type: cpu' \
+  -H 'X-Worker-Capacity: 1')"
+[ "$missing_tasks_registration_status" = "400" ] || fail "worker registration without exact task names was not rejected"
+
 cpu_create="$(curl -fsS --max-time 5 -X POST http://127.0.0.1:7331/v1/tasks \
   -H 'X-Task-Name: cpu.proof' \
   -H 'X-Task-Type: cpu' \
@@ -190,7 +198,16 @@ gpu_create="$(curl -fsS --max-time 5 -X POST http://127.0.0.1:7331/v1/tasks \
   --data-binary 'gpu-secret')" || fail "could not enqueue GPU proof task"
 printf '%s' "$gpu_create" | grep -F '"task_id":2' >/dev/null || fail "GPU proof task id was unexpected"
 
-gpu_registration="$(post_register gpu-worker gpu)" || fail "GPU worker registration failed"
+unsupported_create="$(curl -fsS --max-time 5 -X POST http://127.0.0.1:7331/v1/tasks \
+  -H 'X-Task-Name: cpu.unadvertised' \
+  -H 'X-Task-Type: cpu' \
+  -H 'X-Task-Priority: 9' \
+  -H 'X-Task-Max-Retries: 1' \
+  --data-binary 'must-not-be-delivered')" || fail "could not enqueue same-type unsupported task"
+printf '%s' "$unsupported_create" | grep -F '"task_id":3' >/dev/null || fail "same-type unsupported task id was unexpected"
+
+gpu_registration="$(post_register gpu-worker gpu gpu.proof)" || fail "GPU worker registration failed"
+printf '%s' "$gpu_registration" | grep -F '"task_names":["gpu.proof"]' >/dev/null || fail "GPU exact task advertisement was not echoed"
 gpu_session="$(json_string session_id "$gpu_registration")"
 gpu_token="$(json_string session_token "$gpu_registration")"
 [ "${#gpu_session}" -eq 32 ] || fail "GPU worker session id was malformed"
@@ -204,6 +221,7 @@ wrong_status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1
 sleep 0.2
 gpu_claim="$(post_with_session /v1/claim "$gpu_session" "$gpu_token")" || fail "GPU worker could not claim"
 printf '%s' "$gpu_claim" | grep -F '"task_id":2' >/dev/null || fail "GPU worker claimed a non-GPU task"
+printf '%s' "$gpu_claim" | grep -F '"task_name":"gpu.proof"' >/dev/null || fail "GPU exact task name mismatch"
 printf '%s' "$gpu_claim" | grep -F '"task_type":"gpu"' >/dev/null || fail "GPU worker task type mismatch"
 printf '%s' "$gpu_claim" | grep -F '"payload":"gpu-secret"' >/dev/null || fail "GPU payload was not delivered after claim"
 gpu_generation="$(json_number lease_generation "$gpu_claim")"
@@ -211,6 +229,8 @@ gpu_generation="$(json_number lease_generation "$gpu_claim")"
 
 cpu_snapshot="$(curl -fsS --max-time 5 http://127.0.0.1:7331/v1/tasks/1)" || fail "CPU task snapshot failed"
 printf '%s' "$cpu_snapshot" | grep -F '"status":"PENDING"' >/dev/null || fail "GPU capability crossed into CPU task"
+unsupported_snapshot="$(curl -fsS --max-time 5 http://127.0.0.1:7331/v1/tasks/3)" || fail "unsupported CPU task snapshot failed"
+printf '%s' "$unsupported_snapshot" | grep -F '"status":"PENDING"' >/dev/null || fail "unsupported CPU task was assigned before a compatible worker existed"
 
 stale_generation=$((gpu_generation + 1))
 stale_status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7332/v1/task/heartbeat \
@@ -240,7 +260,8 @@ fi
 session_heartbeat="$(post_with_session /v1/session/heartbeat "$gpu_session" "$gpu_token")" || fail "worker session heartbeat failed"
 printf '%s' "$session_heartbeat" | grep -F '"status":"alive"' >/dev/null || fail "worker session heartbeat response malformed"
 
-cpu_registration="$(post_register cpu-worker cpu)" || fail "CPU worker registration failed"
+cpu_registration="$(post_register cpu-worker cpu cpu.proof)" || fail "CPU worker registration failed"
+printf '%s' "$cpu_registration" | grep -F '"task_names":["cpu.proof"]' >/dev/null || fail "CPU exact task advertisement was not echoed"
 cpu_session="$(json_string session_id "$cpu_registration")"
 cpu_token="$(json_string session_token "$cpu_registration")"
 [ "${#cpu_session}" -eq 32 ] || fail "CPU worker session id was malformed"
@@ -248,12 +269,21 @@ cpu_token="$(json_string session_token "$cpu_registration")"
 sleep 0.2
 cpu_claim="$(post_with_session /v1/claim "$cpu_session" "$cpu_token")" || fail "CPU worker could not claim"
 printf '%s' "$cpu_claim" | grep -F '"task_id":1' >/dev/null || fail "CPU worker did not receive CPU task"
+printf '%s' "$cpu_claim" | grep -F '"task_name":"cpu.proof"' >/dev/null || fail "CPU exact task name mismatch"
 printf '%s' "$cpu_claim" | grep -F '"payload":"cpu-secret"' >/dev/null || fail "CPU payload was not delivered after claim"
 cpu_generation="$(json_number lease_generation "$cpu_claim")"
 post_task_transition /v1/task/heartbeat "$cpu_session" "$cpu_token" 1 "$cpu_generation" >/dev/null || fail "valid CPU heartbeat failed"
 post_task_transition /v1/task/complete "$cpu_session" "$cpu_token" 1 "$cpu_generation" >/dev/null || fail "legacy empty-body CPU completion failed"
 cpu_result_status="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:7331/v1/tasks/1/result)"
 [ "$cpu_result_status" = "404" ] || fail "empty-body completion unexpectedly created a result"
+
+sleep 0.2
+unsupported_claim_status="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:7332/v1/claim \
+  -H "X-Worker-Session: $cpu_session" \
+  -H "X-Worker-Token: $cpu_token")"
+[ "$unsupported_claim_status" = "204" ] || fail "CPU worker received an unadvertised same-type task"
+unsupported_snapshot="$(curl -fsS --max-time 5 http://127.0.0.1:7331/v1/tasks/3)" || fail "final unsupported CPU snapshot failed"
+printf '%s' "$unsupported_snapshot" | grep -F '"status":"PENDING"' >/dev/null || fail "unadvertised same-type task did not remain pending"
 
 final_cpu="$(curl -fsS --max-time 5 http://127.0.0.1:7331/v1/tasks/1)" || fail "final CPU snapshot failed"
 final_gpu="$(curl -fsS --max-time 5 http://127.0.0.1:7331/v1/tasks/2)" || fail "final GPU snapshot failed"
@@ -263,9 +293,11 @@ printf '%s' "$final_gpu" | grep -F '"status":"COMPLETED"' >/dev/null || fail "GP
 printf 'Worker protocol proof state\n'
 printf 'control-plane worker routes       : NOT EXPOSED\n'
 printf 'worker data-plane enqueue         : NOT EXPOSED\n'
+printf 'exact task-name advertisement     : REQUIRED\n'
+printf 'same-type unsupported task        : NOT ASSIGNED\n'
 printf 'wrong session token               : REJECTED\n'
 printf 'hard capability cpu/gpu           : OK\n'
-printf 'Sinkhorn within capability        : OK\n'
+printf 'Sinkhorn within exact capability  : OK\n'
 printf 'payload only after fenced claim   : OK\n'
 printf 'stale lease generation            : REJECTED\n'
 printf 'stale result projection           : REJECTED\n'
