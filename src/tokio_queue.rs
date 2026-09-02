@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::cancellation::{CancellationOutcome, CancellationStore};
 use crate::idempotency::IdempotencyStore;
 use crate::lease_fence::LeaseFence;
 use crate::result_projection::TaskResultStore;
@@ -14,6 +15,7 @@ use crate::value::{
 pub struct AsyncRobustSinkhornQueue {
     inner: Arc<RobustSinkhornQueue>,
     lease_fence: Arc<LeaseFence>,
+    cancellation: Arc<CancellationStore>,
     idempotency: Arc<IdempotencyStore>,
     result_projection: Arc<TaskResultStore>,
 }
@@ -25,6 +27,7 @@ impl AsyncRobustSinkhornQueue {
         Self {
             inner: Arc::new(RobustSinkhornQueue::new(db_path.clone())),
             lease_fence: Arc::new(LeaseFence::new(db_path.clone())),
+            cancellation: Arc::new(CancellationStore::new(db_path.clone())),
             idempotency: Arc::new(IdempotencyStore::new(db_path.clone())),
             result_projection: Arc::new(TaskResultStore::new(db_path)),
         }
@@ -36,6 +39,7 @@ impl AsyncRobustSinkhornQueue {
         Self {
             inner: Arc::new(queue),
             lease_fence: Arc::new(LeaseFence::new(db_path.clone())),
+            cancellation: Arc::new(CancellationStore::new(db_path.clone())),
             idempotency: Arc::new(IdempotencyStore::new(db_path.clone())),
             result_projection: Arc::new(TaskResultStore::new(db_path)),
         }
@@ -63,6 +67,20 @@ impl AsyncRobustSinkhornQueue {
         let lease_fence = self.lease_fence.clone();
 
         tokio::task::spawn_blocking(move || op(lease_fence))
+            .await
+            .map_err(|error| {
+                sync_queue::QueueError::InvalidState(format!("spawn_blocking join error: {error}"))
+            })?
+    }
+
+    async fn blocking_cancellation<F, T>(&self, op: F) -> sync_queue::QueueResult<T>
+    where
+        F: FnOnce(Arc<CancellationStore>) -> sync_queue::QueueResult<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let cancellation = self.cancellation.clone();
+
+        tokio::task::spawn_blocking(move || op(cancellation))
             .await
             .map_err(|error| {
                 sync_queue::QueueError::InvalidState(format!("spawn_blocking join error: {error}"))
@@ -117,6 +135,14 @@ impl AsyncRobustSinkhornQueue {
                 .map(TaskId::new)
         })
         .await
+    }
+
+    pub async fn cancel_task(
+        &self,
+        task_id: TaskId,
+    ) -> sync_queue::QueueResult<CancellationOutcome> {
+        self.blocking_cancellation(move |store| store.cancel_task(task_id.value()))
+            .await
     }
 
     pub async fn recover_expired_leases(&self) -> sync_queue::QueueResult<usize> {
