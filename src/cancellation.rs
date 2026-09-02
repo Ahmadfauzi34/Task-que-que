@@ -196,11 +196,11 @@ mod tests {
         let heartbeat = fence
             .heartbeat(task_id, "worker-1", generation, 10.0)
             .unwrap();
-        assert!(heartbeat.is_stale());
+        assert!(!heartbeat.is_applied());
         let complete = fence
             .complete_task(task_id, "worker-1", LeaseGeneration::new(1))
             .unwrap();
-        assert!(complete.is_stale());
+        assert!(!complete.is_applied());
 
         cleanup(&db_path);
     }
