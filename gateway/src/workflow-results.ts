@@ -35,6 +35,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function own(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
 function exactKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
   const keys = Object.keys(record);
   return keys.length === allowed.length && keys.every((key) => allowed.includes(key));
@@ -96,9 +100,14 @@ function publicProjection(workflowId: number, wrapper: unknown): Record<string, 
   } catch {
     return null;
   }
+  if (!isRecord(projection)) return null;
+
+  const hasOutputs = own(projection, "outputs");
+  const allowedKeys = hasOutputs
+    ? ["schema_version", "workflow_task_id", "status", "steps", "outputs"] as const
+    : ["schema_version", "workflow_task_id", "status", "steps"] as const;
   if (
-    !isRecord(projection) ||
-    !exactKeys(projection, ["schema_version", "workflow_task_id", "status", "steps", "outputs"]) ||
+    !exactKeys(projection, allowedKeys) ||
     projection.schema_version !== 1 ||
     projection.workflow_task_id !== workflowId ||
     projection.status !== "COMPLETED" ||
@@ -132,7 +141,7 @@ function publicProjection(workflowId: number, wrapper: unknown): Record<string, 
     });
   }
 
-  const outputs = validateOutputs(projection.outputs);
+  const outputs = hasOutputs ? validateOutputs(projection.outputs) : {};
   if (outputs === null) return null;
   return {
     schema_version: 1,
