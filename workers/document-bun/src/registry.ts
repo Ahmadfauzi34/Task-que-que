@@ -7,6 +7,7 @@ export interface RegistryTask {
 
 export interface WorkerHandlerContext {
   outputDir: string;
+  signal: AbortSignal;
 }
 
 export type WorkerFailureCode = "invalid_payload" | "processing_failed";

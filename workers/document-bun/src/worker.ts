@@ -355,6 +355,7 @@ async function handleClaim(
   }
 
   const heartbeatController = new AbortController();
+  const processingController = new AbortController();
   let leaseLost = false;
   const heartbeatEveryMs = Math.max(
     50,
@@ -375,6 +376,7 @@ async function handleClaim(
         await taskTransition(config, registration, task, "/v1/task/heartbeat");
       } catch (error) {
         leaseLost = true;
+        processingController.abort(error);
         heartbeatController.abort();
         console.error(
           `document worker lost lease for task ${task.task_id}: ${error instanceof Error ? error.message : "unknown error"}`,
@@ -386,9 +388,17 @@ async function handleClaim(
   let resultProjection: string | undefined;
   try {
     if (config.processDelayMs > 0) {
-      await sleep(config.processDelayMs);
+      await sleep(config.processDelayMs, processingController.signal);
     }
-    const result = await handler.handle(task, { outputDir: config.outputDir });
+    if (processingController.signal.aborted) {
+      heartbeatController.abort();
+      await heartbeatLoop;
+      return;
+    }
+    const result = await handler.handle(task, {
+      outputDir: config.outputDir,
+      signal: processingController.signal,
+    });
     resultProjection = serializeResultProjection(result);
   } catch (error) {
     heartbeatController.abort();
