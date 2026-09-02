@@ -227,6 +227,7 @@ async function register(
       "X-Worker-Id": config.workerId,
       "X-Worker-Type": registry.workerType,
       "X-Worker-Capacity": String(config.capacity),
+      "X-Worker-Tasks": registry.taskNames.join(","),
     },
   });
   const registration = await responseJson<Registration>(response);
