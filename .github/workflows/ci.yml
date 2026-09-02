@@ -24,6 +24,7 @@ jobs:
           sh -n gateway/install-bun-termux.sh
           sh -n gateway/tests/termux-smoke.sh
           sh -n gateway/tests/trycloudflare-smoke.sh
+          bash -n gateway/tests/workflow-cancellation-e2e.sh
           sh -n tests/termux-shutdown-smoke.sh
           sh -n tests/worker-protocol-smoke.sh
           sh -n tests/termux-worker-protocol-smoke.sh
@@ -93,6 +94,9 @@ jobs:
 
       - name: Run localhost protocol smoke test
         run: bash gateway/tests/e2e.sh
+
+      - name: Prove public workflow cancellation reaches durable queue state
+        run: bash gateway/tests/workflow-cancellation-e2e.sh
 
   worker-integration:
     name: Worker Protocol Integration
