@@ -15,12 +15,13 @@ function handler(taskName: string, taskType = "cpu"): WorkerHandler {
 }
 
 describe("worker handler registry", () => {
-  test("resolves multiple handlers by exact task name inside one hard capability", () => {
+  test("resolves and advertises exact task names inside one hard capability", () => {
     const first = handler("document.process");
     const second = handler("document.preview");
     const registry = new WorkerHandlerRegistry("cpu", [first, second]);
 
     expect(registry.size).toBe(2);
+    expect(registry.taskNames).toEqual(["document.preview", "document.process"]);
     expect(registry.resolve("document.process", "cpu")).toBe(first);
     expect(registry.resolve("document.preview", "cpu")).toBe(second);
     expect(registry.resolve("document.missing", "cpu")).toBeUndefined();
