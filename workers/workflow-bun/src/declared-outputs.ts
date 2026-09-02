@@ -18,6 +18,7 @@ export const MAX_WORKFLOW_OUTPUTS = 32;
 export const MAX_WORKFLOW_OUTPUT_BYTES = 128 * 1024;
 
 const SAFE_OUTPUT_NAME = /^[A-Za-z0-9._:-]{1,64}$/;
+const FORBIDDEN_OUTPUT_NAMES = new Set(["__proto__", "prototype", "constructor"]);
 const encoder = new TextEncoder();
 
 export interface DeclaredWorkflowDefinition {
@@ -97,9 +98,9 @@ export function parseDeclaredWorkflow(rawPayload: string): DeclaredWorkflowDefin
     );
   }
 
-  const outputs: Record<string, WorkflowResultReference> = {};
+  const outputs = Object.create(null) as Record<string, WorkflowResultReference>;
   for (const [name, reference] of entries) {
-    if (!SAFE_OUTPUT_NAME.test(name)) {
+    if (!SAFE_OUTPUT_NAME.test(name) || FORBIDDEN_OUTPUT_NAMES.has(name)) {
       throw new WorkflowPayloadError(`workflow output name ${name} is invalid`);
     }
     outputs[name] = parseOutputReference(name, reference, stepIds);
