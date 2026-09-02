@@ -153,6 +153,139 @@ describe("public workflow status", () => {
     expect(wrongType?.status).toBe(404);
     expect(await wrongType?.text()).toContain("workflow_not_found");
   });
+
+  test("projects CANCELLED as a first-class workflow terminal state", async () => {
+    const fetchImpl: FetchLike = async () => Response.json(queueSnapshot(18, "workflow.run", "CANCELLED"));
+    const response = await handlePublicWorkflowRequest(
+      request("/v1/workflows/18", { headers: authHeaders() }),
+      deps(fetchImpl),
+    );
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toEqual({
+      workflow_id: 18,
+      status: "CANCELLED",
+      retry_count: 0,
+      created_at: 1,
+      updated_at: 2,
+    });
+  });
+});
+
+describe("public workflow cancellation", () => {
+  test("validates workflow identity before revoking parent authority", async () => {
+    const calls: string[] = [];
+    const fetchImpl: FetchLike = async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      calls.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/v1/tasks/81" && (init?.method ?? "GET") === "GET") {
+        return Response.json(queueSnapshot(81, "workflow.run", "RUNNING"));
+      }
+      if (path === "/v1/tasks/81/cancel" && init?.method === "POST") {
+        return Response.json({ task_id: 81, status: "CANCELLED", cancellation: "applied" });
+      }
+      throw new Error(`unexpected upstream request: ${init?.method ?? "GET"} ${path}`);
+    };
+
+    const response = await handlePublicWorkflowRequest(
+      request("/v1/workflows/81/cancel", { method: "POST", headers: authHeaders() }),
+      deps(fetchImpl),
+    );
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toEqual({ workflow_id: 81, status: "CANCELLED", replayed: false });
+    expect(calls).toEqual(["GET /v1/tasks/81", "POST /v1/tasks/81/cancel"]);
+  });
+
+  test("cannot use the workflow facade to cancel a non-workflow task", async () => {
+    let cancelCalls = 0;
+    const fetchImpl: FetchLike = async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/tasks/82") {
+        return Response.json(queueSnapshot(82, "hash.compute", "RUNNING"));
+      }
+      if (path.endsWith("/cancel") && init?.method === "POST") cancelCalls += 1;
+      throw new Error(`unexpected upstream request: ${path}`);
+    };
+
+    const response = await handlePublicWorkflowRequest(
+      request("/v1/workflows/82/cancel", { method: "POST", headers: authHeaders() }),
+      deps(fetchImpl),
+    );
+    expect(response?.status).toBe(404);
+    expect(await response?.text()).toContain("workflow_not_found");
+    expect(cancelCalls).toBe(0);
+  });
+
+  test("replays an already-cancelled workflow without mutating the fence again", async () => {
+    let cancelCalls = 0;
+    const fetchImpl: FetchLike = async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/tasks/83") {
+        return Response.json(queueSnapshot(83, "workflow.run", "CANCELLED"));
+      }
+      if (path.endsWith("/cancel") && init?.method === "POST") cancelCalls += 1;
+      throw new Error(`unexpected upstream request: ${path}`);
+    };
+
+    const response = await handlePublicWorkflowRequest(
+      request("/v1/workflows/83/cancel", { method: "POST", headers: authHeaders() }),
+      deps(fetchImpl),
+    );
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toEqual({ workflow_id: 83, status: "CANCELLED", replayed: true });
+    expect(cancelCalls).toBe(0);
+  });
+
+  test("does not overwrite a workflow that already completed", async () => {
+    let cancelCalls = 0;
+    const fetchImpl: FetchLike = async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/tasks/84") {
+        return Response.json(queueSnapshot(84, "workflow.run", "COMPLETED"));
+      }
+      if (path.endsWith("/cancel") && init?.method === "POST") cancelCalls += 1;
+      throw new Error(`unexpected upstream request: ${path}`);
+    };
+
+    const response = await handlePublicWorkflowRequest(
+      request("/v1/workflows/84/cancel", { method: "POST", headers: authHeaders() }),
+      deps(fetchImpl),
+    );
+    expect(response?.status).toBe(409);
+    expect(await response?.text()).toContain("workflow_not_cancellable");
+    expect(cancelCalls).toBe(0);
+  });
+
+  test("maps a completion-vs-cancel race to a terminal conflict", async () => {
+    const fetchImpl: FetchLike = async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/tasks/85") return Response.json(queueSnapshot(85, "workflow.run", "RUNNING"));
+      if (path === "/v1/tasks/85/cancel" && init?.method === "POST") {
+        return new Response('{"error":"already terminal"}', { status: 409 });
+      }
+      throw new Error(`unexpected upstream request: ${path}`);
+    };
+
+    const response = await handlePublicWorkflowRequest(
+      request("/v1/workflows/85/cancel", { method: "POST", headers: authHeaders() }),
+      deps(fetchImpl),
+    );
+    expect(response?.status).toBe(409);
+    expect(await response?.text()).toContain("workflow_not_cancellable");
+  });
+
+  test("inherits bearer authorization before any cancellation I/O", async () => {
+    let upstreamCalls = 0;
+    const fetchImpl: FetchLike = async () => {
+      upstreamCalls += 1;
+      return new Response();
+    };
+    const response = await handlePublicWorkflowRequest(
+      request("/v1/workflows/86/cancel", { method: "POST" }),
+      deps(fetchImpl),
+    );
+    expect(response?.status).toBe(401);
+    expect(upstreamCalls).toBe(0);
+  });
 });
 
 describe("public workflow result", () => {
@@ -213,6 +346,23 @@ describe("public workflow result", () => {
       deps(fetchImpl),
     );
     expect(response?.status).toBe(409);
+    expect(resultReads).toBe(0);
+  });
+
+  test("does not expose a result for a cancelled workflow", async () => {
+    let resultReads = 0;
+    const fetchImpl: FetchLike = async (input) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/tasks/62") return Response.json(queueSnapshot(62, "workflow.run", "CANCELLED"));
+      if (path.endsWith("/result")) resultReads += 1;
+      return new Response(null, { status: 404 });
+    };
+    const response = await handlePublicWorkflowRequest(
+      request("/v1/workflows/62/result", { headers: authHeaders() }),
+      deps(fetchImpl),
+    );
+    expect(response?.status).toBe(409);
+    expect(await response?.text()).toContain("CANCELLED");
     expect(resultReads).toBe(0);
   });
 

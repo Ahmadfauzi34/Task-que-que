@@ -33,6 +33,7 @@ pub struct QueueMetricsSnapshot {
     pub running: i64,
     pub completed: i64,
     pub failed: i64,
+    pub cancelled: i64,
     pub unknown_status: i64,
     pub pending_runnable: i64,
     pub pending_delayed: i64,
@@ -124,6 +125,7 @@ impl TaskQueryStore {
                 running,
                 completed,
                 failed,
+                cancelled,
                 unknown_status,
                 pending_runnable,
                 pending_delayed,
@@ -139,7 +141,8 @@ impl TaskQueryStore {
                     COALESCE(SUM(status = 'RUNNING'), 0),
                     COALESCE(SUM(status = 'COMPLETED'), 0),
                     COALESCE(SUM(status = 'FAILED'), 0),
-                    COALESCE(SUM(status NOT IN ('PENDING', 'ASSIGNED', 'RUNNING', 'COMPLETED', 'FAILED')), 0),
+                    COALESCE(SUM(status = 'CANCELLED'), 0),
+                    COALESCE(SUM(status NOT IN ('PENDING', 'ASSIGNED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED')), 0),
                     COALESCE(SUM(status = 'PENDING' AND scheduled_at <= ?1), 0),
                     COALESCE(SUM(status = 'PENDING' AND scheduled_at > ?1), 0),
                     COALESCE(SUM(status IN ('ASSIGNED', 'RUNNING') AND locked_until IS NOT NULL AND locked_until >= ?1), 0),
@@ -162,7 +165,8 @@ impl TaskQueryStore {
                         row.get::<_, i64>(9)?,
                         row.get::<_, i64>(10)?,
                         row.get::<_, i64>(11)?,
-                        row.get::<_, Option<f64>>(12)?,
+                        row.get::<_, i64>(12)?,
+                        row.get::<_, Option<f64>>(13)?,
                     ))
                 },
             )?;
@@ -179,6 +183,7 @@ impl TaskQueryStore {
                 running,
                 completed,
                 failed,
+                cancelled,
                 unknown_status,
                 pending_runnable,
                 pending_delayed,
@@ -214,6 +219,7 @@ mod tests {
         let delayed_id = queue.enqueue_simple("delayed", "cpu", "secret-b").unwrap();
         let expired_id = queue.enqueue_simple("expired", "cpu", "secret-c").unwrap();
         let unknown_id = queue.enqueue_simple("unknown", "cpu", "secret-d").unwrap();
+        let cancelled_id = queue.enqueue_simple("cancelled", "cpu", "secret-e").unwrap();
         let now = now_f64();
 
         DatabaseManager::execute_with_retry(&db_path, |conn| {
@@ -231,16 +237,21 @@ mod tests {
                 "UPDATE tasks SET status = 'FUTURE_STATE' WHERE id = ?1",
                 params![unknown_id],
             )?;
+            conn.execute(
+                "UPDATE tasks SET status = 'CANCELLED' WHERE id = ?1",
+                params![cancelled_id],
+            )?;
             Ok(())
         })
         .unwrap();
 
         let snapshot = TaskQueryStore::new(&db_path).metrics().unwrap();
-        assert_eq!(snapshot.total_tasks, 4);
+        assert_eq!(snapshot.total_tasks, 5);
         assert_eq!(snapshot.pending, 2);
         assert_eq!(snapshot.pending_runnable, 1);
         assert_eq!(snapshot.pending_delayed, 1);
         assert_eq!(snapshot.running, 1);
+        assert_eq!(snapshot.cancelled, 1);
         assert_eq!(snapshot.expired_leases, 1);
         assert_eq!(snapshot.active_leases, 0);
         assert_eq!(snapshot.active_without_lease_deadline, 0);

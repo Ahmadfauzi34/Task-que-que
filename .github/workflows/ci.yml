@@ -36,6 +36,8 @@ jobs:
           sh -n tests/termux-workflow-worker-smoke.sh
           bash -n tests/reference-workflow-dataflow-smoke.sh
           sh -n tests/termux-workflow-dataflow-smoke.sh
+          bash -n tests/reference-public-workflow-cancellation-smoke.sh
+          sh -n tests/termux-public-workflow-cancellation-smoke.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -141,3 +143,6 @@ jobs:
 
       - name: Prove public queue to reference worker flow
         run: timeout 45s bash tests/reference-document-worker-smoke.sh
+
+      - name: Prove public workflow cancellation chain
+        run: timeout 45s bash tests/reference-public-workflow-cancellation-smoke.sh
