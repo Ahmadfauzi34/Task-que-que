@@ -2,24 +2,27 @@ import { TokenBucketAdmissionController } from "./admission";
 import { handleRequest, MAX_PUBLIC_REQUEST_BYTES } from "./app";
 import { loadGatewayConfig } from "./config";
 import { TASK_REGISTRY } from "./registry";
+import { handlePublicWorkflowRequest } from "./workflows";
 
 const config = loadGatewayConfig();
 const admissionController = new TokenBucketAdmissionController(
   config.enqueueRatePerSecond,
   config.enqueueBurst,
 );
+const dependencies = {
+  config,
+  registry: TASK_REGISTRY,
+  admissionController,
+};
 
 const server = Bun.serve({
   hostname: config.hostname,
   port: config.port,
   maxRequestBodySize: MAX_PUBLIC_REQUEST_BYTES,
   idleTimeout: 10,
-  fetch(request) {
-    return handleRequest(request, {
-      config,
-      registry: TASK_REGISTRY,
-      admissionController,
-    });
+  async fetch(request) {
+    const workflowResponse = await handlePublicWorkflowRequest(request, dependencies);
+    return workflowResponse ?? handleRequest(request, dependencies);
   },
   error(error) {
     console.error("gateway request failure", error);
@@ -39,4 +42,5 @@ console.log(`queue  : ${config.queueDaemonOrigin}`);
 console.log(`auth   : ${config.allowUnauthenticated ? "explicitly disabled" : "bearer token required"}`);
 console.log(`tasks  : ${Object.keys(TASK_REGISTRY).join(", ") || "none"}`);
 console.log(`enqueue: ${config.enqueueRatePerSecond}/s, burst ${config.enqueueBurst}`);
+console.log("workflow api: /v1/workflows");
 console.log("status : ready");

@@ -84,12 +84,12 @@ wait_for_log() {
   return 1
 }
 
-wait_for_task_status() {
-  local task_id="$1"
+wait_for_workflow_status() {
+  local workflow_id="$1"
   local expected="$2"
   local snapshot=""
   for _ in {1..300}; do
-    snapshot="$(curl -fsS --max-time 2 "http://127.0.0.1:3000/v1/tasks/$task_id" \
+    snapshot="$(curl -fsS --max-time 2 "http://127.0.0.1:3000/v1/workflows/$workflow_id" \
       -H "Authorization: Bearer $TOKEN" 2>/dev/null || true)"
     if printf '%s' "$snapshot" | grep -F "\"status\":\"$expected\"" >/dev/null; then
       printf '%s' "$snapshot"
@@ -159,16 +159,16 @@ wait_for_log 'id=document-reference-worker' "$TMP_DIR/cpu.log" || fail "cpu work
 wait_for_log 'id=remote-agent-reference-worker' "$TMP_DIR/remote.log" || fail "remote agent worker did not register"
 wait_for_log 'id=workflow-reference-worker' "$TMP_DIR/workflow.log" || fail "workflow worker did not register"
 
-WORKFLOW_BODY='{"type":"workflow.run","payload":{"steps":[{"id":"source","type":"hash.compute","payload":{"data":"bounded workflow dataflow","algorithm":"sha256"}},{"id":"agent","type":"agent.invoke","payload":{"request_id":"bounded-dataflow","input":{"digest":{"$from":"source","path":"digest"},"bytes":{"$from":"source","path":"bytes"}}},"depends_on":["source"]}]},"priority":0,"max_retries":2}'
-created="$(curl -fsS --max-time 5 -X POST http://127.0.0.1:3000/v1/tasks \
+WORKFLOW_BODY='{"steps":[{"id":"source","type":"hash.compute","payload":{"data":"bounded workflow dataflow","algorithm":"sha256"}},{"id":"agent","type":"agent.invoke","payload":{"request_id":"bounded-dataflow","input":{"digest":{"$from":"source","path":"digest"},"bytes":{"$from":"source","path":"bytes"}}},"depends_on":["source"]}]}'
+created="$(curl -fsS --max-time 5 -X POST http://127.0.0.1:3000/v1/workflows \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: workflow-dataflow-parent-1' --data-binary "$WORKFLOW_BODY")" || fail "dataflow workflow enqueue failed"
-WORKFLOW_ID="$(printf '%s' "$created" | sed -n 's/.*"task_id":\([0-9][0-9]*\).*/\1/p')"
-[[ -n "$WORKFLOW_ID" ]] || fail "dataflow workflow enqueue did not return task id"
+  -H 'Idempotency-Key: workflow-dataflow-parent-1' --data-binary "$WORKFLOW_BODY")" || fail "public workflow enqueue failed"
+WORKFLOW_ID="$(printf '%s' "$created" | sed -n 's/.*"workflow_id":\([0-9][0-9]*\).*/\1/p')"
+[[ -n "$WORKFLOW_ID" ]] || fail "public workflow enqueue did not return workflow id"
 
 wait_for_log "parent=$WORKFLOW_ID step=source" "$TMP_DIR/workflow.log" || fail "source step was not submitted"
 wait_for_log "parent=$WORKFLOW_ID step=agent" "$TMP_DIR/workflow.log" || fail "agent step was not submitted"
-wait_for_task_status "$WORKFLOW_ID" COMPLETED >/dev/null || fail "dataflow workflow did not complete"
+wait_for_workflow_status "$WORKFLOW_ID" COMPLETED >/dev/null || fail "public workflow status did not reach COMPLETED"
 
 [[ -f "$TMP_DIR/mock-calls.log" ]] || fail "mock agent was never called"
 [[ "$(wc -l < "$TMP_DIR/mock-calls.log" | tr -d ' ')" = "1" ]] || fail "dataflow agent did not execute exactly once"
@@ -176,27 +176,45 @@ grep -F '"digest_match":true' "$TMP_DIR/mock-calls.log" >/dev/null || fail "hash
 grep -F '"bytes_match":true' "$TMP_DIR/mock-calls.log" >/dev/null || fail "hash byte count was not resolved into agent input"
 
 SOURCE_ID="$(sed -n "s/.*parent=$WORKFLOW_ID step=source task=\([0-9][0-9]*\).*/\1/p" "$TMP_DIR/workflow.log" | head -n1)"
+AGENT_ID="$(sed -n "s/.*parent=$WORKFLOW_ID step=agent task=\([0-9][0-9]*\).*/\1/p" "$TMP_DIR/workflow.log" | head -n1)"
 [[ -n "$SOURCE_ID" ]] || fail "source task id missing"
+[[ -n "$AGENT_ID" ]] || fail "agent task id missing"
+
 source_projection="$(curl -fsS --max-time 2 "http://127.0.0.1:7331/v1/tasks/$SOURCE_ID/result")" || fail "source projection was not readable from loopback queue API"
 printf '%s' "$source_projection" | grep -F "$EXPECTED_DIGEST" >/dev/null || fail "durable source projection digest mismatch"
 
-INVALID_BODY='{"type":"workflow.run","payload":{"steps":[{"id":"left","type":"hash.compute","payload":{"data":"left","algorithm":"sha256"}},{"id":"right","type":"hash.compute","payload":{"data":"right","algorithm":"sha256"}},{"id":"consumer","type":"agent.invoke","payload":{"input":{"digest":{"$from":"right","path":"digest"}}},"depends_on":["left"]}]},"max_retries":0}'
-invalid_created="$(curl -fsS --max-time 5 -X POST http://127.0.0.1:3000/v1/tasks \
+workflow_result="$(curl -fsS --max-time 2 "http://127.0.0.1:3000/v1/workflows/$WORKFLOW_ID/result" \
+  -H "Authorization: Bearer $TOKEN")" || fail "public workflow result was not readable"
+printf '%s' "$workflow_result" | grep -F "\"workflow_id\":$WORKFLOW_ID" >/dev/null || fail "public workflow result id mismatch"
+printf '%s' "$workflow_result" | grep -F "\"task_id\":$SOURCE_ID" >/dev/null || fail "public workflow result omitted source topology"
+printf '%s' "$workflow_result" | grep -F "\"task_id\":$AGENT_ID" >/dev/null || fail "public workflow result omitted agent topology"
+if printf '%s' "$workflow_result" | grep -E 'result_json|result_bytes|digest|payload|lease_generation|locked_by' >/dev/null; then
+  fail "public workflow result leaked child result data or worker internals"
+fi
+
+PUBLIC_RESULT_CODE="$(curl -sS -o "$TMP_DIR/generic-result.json" -w '%{http_code}' --max-time 2 \
+  "http://127.0.0.1:3000/v1/tasks/$WORKFLOW_ID/result" -H "Authorization: Bearer $TOKEN")"
+[[ "$PUBLIC_RESULT_CODE" = "404" ]] || fail "generic public task result route unexpectedly exists"
+
+INVALID_BODY='{"steps":[{"id":"left","type":"hash.compute","payload":{"data":"left","algorithm":"sha256"}},{"id":"right","type":"hash.compute","payload":{"data":"right","algorithm":"sha256"}},{"id":"consumer","type":"agent.invoke","payload":{"input":{"digest":{"$from":"right","path":"digest"}}},"depends_on":["left"]}]}'
+invalid_created="$(curl -fsS --max-time 5 -X POST http://127.0.0.1:3000/v1/workflows \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: workflow-dataflow-authority-1' --data-binary "$INVALID_BODY")" || fail "invalid authority workflow enqueue failed"
-INVALID_ID="$(printf '%s' "$invalid_created" | sed -n 's/.*"task_id":\([0-9][0-9]*\).*/\1/p')"
-[[ -n "$INVALID_ID" ]] || fail "invalid authority workflow task id missing"
-wait_for_task_status "$INVALID_ID" FAILED >/dev/null || fail "non-ancestor result reference did not fail closed"
+INVALID_ID="$(printf '%s' "$invalid_created" | sed -n 's/.*"workflow_id":\([0-9][0-9]*\).*/\1/p')"
+[[ -n "$INVALID_ID" ]] || fail "invalid authority workflow id missing"
+wait_for_workflow_status "$INVALID_ID" FAILED >/dev/null || fail "non-ancestor result reference did not fail closed"
 if grep -F "parent=$INVALID_ID step=" "$TMP_DIR/workflow.log" >/dev/null; then
   fail "non-ancestor result reference submitted a child before validation"
 fi
 
 PUBLIC_SOURCE="$(curl -fsS --max-time 2 "http://127.0.0.1:3000/v1/tasks/$SOURCE_ID" -H "Authorization: Bearer $TOKEN")" || fail "public source snapshot missing"
 if printf '%s' "$PUBLIC_SOURCE" | grep -E 'result_json|digest|payload|lease_generation|locked_by' >/dev/null; then
-  fail "public gateway leaked result projection or worker internals"
+  fail "public gateway leaked child result projection or worker internals"
 fi
 
 echo "Workflow dataflow proof state"
+echo "public workflow submit/status/result  : OK"
+echo "public workflow topology result       : EXPORTED"
 echo "durable child result projection       : READ ON LOOPBACK ONLY"
 echo "exact \$from source step               : OK"
 echo "bounded exact result path             : OK"
@@ -204,7 +222,7 @@ echo "hash digest -> remote agent input     : OK"
 echo "hash byte count -> remote agent input : OK"
 echo "dependency graph = data authority     : OK"
 echo "non-ancestor result reference         : FAILED CLOSED BEFORE CHILD"
-echo "public gateway result disclosure      : NONE"
+echo "public child result disclosure        : NONE"
 echo "eval/template/filesystem primitive    : NONE"
 echo
 echo "Reference workflow dataflow integration: OK (workflow=$WORKFLOW_ID source=$SOURCE_ID)"

@@ -57,8 +57,10 @@ printf 'queue artifact sha256           : %s\n' "$ACTUAL_QUEUE_SHA"
 printf 'worker broker artifact sha256   : %s\n' "$ACTUAL_WORKER_SHA"
 printf 'reviewed queue artifact         : MATCH\n'
 printf 'reviewed worker broker artifact : MATCH\n'
+printf 'public workflow API             : EXECUTED\n'
+printf 'parent workflow projection      : EXPORTED\n'
 printf 'Bun workflow resolver           : EXECUTED\n'
-printf 'durable result projection       : CONSUMED\n'
+printf 'durable child result projection : CONSUMED\n'
 printf 'Bun remote agent worker         : EXECUTED\n'
 printf 'non-ancestor authority check    : REJECTED\n'
 printf '\nTermux workflow dataflow: OK\n'

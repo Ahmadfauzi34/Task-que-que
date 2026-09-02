@@ -1,7 +1,13 @@
-import { WorkerHandlerRegistry } from "../../document-bun/src/registry";
+import {
+  WorkerHandlerRegistry,
+  type WorkerHandler,
+} from "../../document-bun/src/registry";
 import { runWorker, type WorkerConfig } from "../../document-bun/src/worker";
 import {
-  createWorkflowHandler,
+  WorkflowPayloadError,
+  executeWorkflow,
+  validateWorkflowGatewayConfig,
+  writeWorkflowResultAtomic,
   type WorkflowGatewayConfig,
 } from "./workflow-handler";
 
@@ -113,7 +119,22 @@ export function loadWorkflowWorkerConfig(
 export function createWorkflowWorkerRegistry(
   config: WorkflowGatewayConfig,
 ): WorkerHandlerRegistry {
-  return new WorkerHandlerRegistry("workflow", [createWorkflowHandler(config)]);
+  const validated = validateWorkflowGatewayConfig(config);
+  const handler: WorkerHandler = {
+    taskName: "workflow.run",
+    taskType: "workflow",
+
+    async handle(task, context) {
+      const result = await executeWorkflow(task.task_id, task.payload, validated);
+      await writeWorkflowResultAtomic(context.outputDir, result);
+      return result;
+    },
+
+    classifyError(error) {
+      return error instanceof WorkflowPayloadError ? "invalid_payload" : "processing_failed";
+    },
+  };
+  return new WorkerHandlerRegistry("workflow", [handler]);
 }
 
 if (import.meta.main) {
