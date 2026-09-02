@@ -129,9 +129,11 @@ async function handleCreateWorkflow(
   );
 }
 
+type WorkflowStatus = "PENDING" | "ASSIGNED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+
 interface WorkflowSnapshot {
   workflowId: number;
-  status: "PENDING" | "ASSIGNED" | "RUNNING" | "COMPLETED" | "FAILED";
+  status: WorkflowStatus;
   retryCount: number | null;
   createdAt: unknown;
   updatedAt: unknown;
@@ -172,7 +174,8 @@ async function readWorkflowSnapshot(
       status !== "ASSIGNED" &&
       status !== "RUNNING" &&
       status !== "COMPLETED" &&
-      status !== "FAILED")
+      status !== "FAILED" &&
+      status !== "CANCELLED")
   ) {
     return errorResponse(502, "invalid_gateway_response", "task facade returned invalid workflow state");
   }
@@ -214,6 +217,73 @@ async function fetchWithTimeout(
     return await fetchImpl(input, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);
+  }
+}
+
+async function handleCancelWorkflow(
+  request: Request,
+  workflowIdText: string,
+  dependencies: GatewayDependencies,
+): Promise<Response> {
+  const snapshot = await readWorkflowSnapshot(request, workflowIdText, dependencies);
+  if (snapshot instanceof Response) return snapshot;
+
+  if (snapshot.status === "CANCELLED") {
+    return jsonResponse({
+      workflow_id: snapshot.workflowId,
+      status: "CANCELLED",
+      already_cancelled: true,
+    });
+  }
+  if (snapshot.status === "COMPLETED" || snapshot.status === "FAILED") {
+    return errorResponse(
+      409,
+      "workflow_terminal",
+      `workflow cannot be cancelled after status ${snapshot.status}`,
+    );
+  }
+
+  const fetchImpl = dependencies.fetchImpl ?? fetch;
+  try {
+    const upstream = await fetchWithTimeout(
+      fetchImpl,
+      `${dependencies.config.queueDaemonOrigin}/v1/tasks/${snapshot.workflowId}/cancel`,
+      { method: "POST", redirect: "error" },
+      dependencies.config.upstreamTimeoutMs,
+    );
+
+    if (upstream.status === 404) {
+      return errorResponse(404, "workflow_not_found", "workflow not found");
+    }
+    if (upstream.status === 409) {
+      return errorResponse(409, "workflow_terminal", "workflow became terminal before cancellation");
+    }
+    if (upstream.status !== 200) {
+      return errorResponse(502, "queue_cancel_failed", "queue daemon could not revoke workflow authority");
+    }
+
+    let body: unknown;
+    try {
+      body = await upstream.json();
+    } catch {
+      return errorResponse(502, "invalid_queue_response", "queue daemon returned invalid cancellation JSON");
+    }
+    if (
+      !isRecord(body) ||
+      body.task_id !== snapshot.workflowId ||
+      body.status !== "CANCELLED" ||
+      typeof body.already_cancelled !== "boolean"
+    ) {
+      return errorResponse(502, "invalid_queue_response", "queue daemon returned invalid cancellation state");
+    }
+
+    return jsonResponse({
+      workflow_id: snapshot.workflowId,
+      status: "CANCELLED",
+      already_cancelled: body.already_cancelled,
+    });
+  } catch {
+    return errorResponse(503, "queue_unavailable", "queue daemon is unavailable");
   }
 }
 
@@ -354,6 +424,13 @@ export async function handlePublicWorkflowRequest(
     return request.method === "GET"
       ? handleGetWorkflowResult(request, resultMatch[1]!, dependencies)
       : errorResponse(405, "method_not_allowed", "GET required");
+  }
+
+  const cancelMatch = /^\/v1\/workflows\/([^/]+)\/cancel$/.exec(path);
+  if (cancelMatch) {
+    return request.method === "POST"
+      ? handleCancelWorkflow(request, cancelMatch[1]!, dependencies)
+      : errorResponse(405, "method_not_allowed", "POST required");
   }
 
   const workflowMatch = /^\/v1\/workflows\/([^/]+)$/.exec(path);
