@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 const repoRoot = resolve(import.meta.dir, "../../..");
 
 test(
-  "passes bounded durable result data from a hash step into a remote-agent step",
+  "passes bounded durable result data from a hash step into a remote-agent step through the public workflow API",
   async () => {
     const child = Bun.spawn(["bash", "tests/reference-workflow-dataflow-smoke.sh"], {
       cwd: repoRoot,
@@ -28,11 +28,13 @@ test(
       );
     }
 
+    expect(stdout).toContain("public workflow submit/status/result  : OK");
+    expect(stdout).toContain("public workflow topology result       : EXPORTED");
     expect(stdout).toContain("durable child result projection       : READ ON LOOPBACK ONLY");
     expect(stdout).toContain("hash digest -> remote agent input     : OK");
     expect(stdout).toContain("dependency graph = data authority     : OK");
     expect(stdout).toContain("non-ancestor result reference         : FAILED CLOSED BEFORE CHILD");
-    expect(stdout).toContain("public gateway result disclosure      : NONE");
+    expect(stdout).toContain("public child result disclosure        : NONE");
     expect(stdout).toContain("Reference workflow dataflow integration: OK");
   },
   60_000,
