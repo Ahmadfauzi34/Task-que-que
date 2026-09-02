@@ -106,6 +106,7 @@ fn now_f64() -> f64 {
 mod tests {
     use super::*;
     use crate::lease_fence::LeaseFence;
+    use crate::result_projection::TaskResultStore;
     use crate::sync_queue::{RobustSinkhornQueue, WorkerDescriptor};
     use crate::task_query::TaskQueryStore;
     use crate::value::{LeaseMutation, TaskStatus};
@@ -162,6 +163,8 @@ mod tests {
     fn running_cancellation_revokes_the_exact_fence_generation() {
         let db_path = temp_db("cancel_running");
         let (queue, fence, cancellation) = prepare(&db_path);
+        let results = TaskResultStore::new(&db_path);
+        results.ensure_schema().unwrap();
         let task_id = queue.enqueue_simple("workflow.run", "workflow", "{}").unwrap();
         let worker_id = "workflow-1";
 
@@ -200,6 +203,18 @@ mod tests {
                 .unwrap(),
             LeaseMutation::Stale
         );
+        assert_eq!(
+            results
+                .complete_with_projection(
+                    task_id,
+                    worker_id,
+                    claimed.lease_generation,
+                    r#"{"must_not":"persist"}"#,
+                )
+                .unwrap(),
+            LeaseMutation::Stale
+        );
+        assert!(results.get(task_id).unwrap().is_none());
 
         let snapshot = TaskQueryStore::new(&db_path).get_task(task_id).unwrap().unwrap();
         assert_eq!(snapshot.status, TaskStatus::Cancelled.as_str());
