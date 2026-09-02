@@ -1,14 +1,17 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ndarray::{Array1, Array2};
-use rusqlite::{params, TransactionBehavior};
+use rusqlite::{params, params_from_iter, types::Value, TransactionBehavior};
 
 use crate::sync_queue::{DatabaseManager, QueueError, QueueResult};
 use crate::value::{Epsilon, LeaseDuration, WorkerKind};
+
+const MAX_TASK_NAMES_PER_WORKER: usize = 32;
+const MAX_TASK_NAME_BYTES: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerSession {
@@ -16,6 +19,7 @@ pub struct WorkerSession {
     pub worker_id: String,
     pub kind: WorkerKind,
     pub capacity: i64,
+    pub task_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,8 +64,15 @@ impl WorkerRegistry {
         worker_id: impl Into<String>,
         kind: WorkerKind,
         capacity: i64,
+        task_names: Vec<String>,
     ) -> QueueResult<WorkerRegistration> {
-        self.register_at(worker_id.into(), kind, capacity, Instant::now())
+        self.register_at(
+            worker_id.into(),
+            kind,
+            capacity,
+            task_names,
+            Instant::now(),
+        )
     }
 
     fn register_at(
@@ -69,6 +80,7 @@ impl WorkerRegistry {
         worker_id: String,
         kind: WorkerKind,
         capacity: i64,
+        task_names: Vec<String>,
         now: Instant,
     ) -> QueueResult<WorkerRegistration> {
         if worker_id.is_empty() {
@@ -81,6 +93,7 @@ impl WorkerRegistry {
                 "worker capacity must be greater than zero".into(),
             ));
         }
+        let task_names = normalize_task_names(task_names)?;
 
         let mut sessions = self.lock_sessions()?;
         sessions.retain(|_, entry| entry.expires_at > now && entry.session.worker_id != worker_id);
@@ -101,6 +114,7 @@ impl WorkerRegistry {
             worker_id,
             kind,
             capacity,
+            task_names,
         };
 
         sessions.insert(
@@ -173,10 +187,41 @@ impl WorkerRegistry {
     }
 }
 
+fn normalize_task_names(mut task_names: Vec<String>) -> QueueResult<Vec<String>> {
+    if task_names.is_empty() || task_names.len() > MAX_TASK_NAMES_PER_WORKER {
+        return Err(QueueError::InvalidState(format!(
+            "worker must advertise between 1 and {MAX_TASK_NAMES_PER_WORKER} exact task names"
+        )));
+    }
+    for task_name in &task_names {
+        if !is_safe_task_name(task_name) {
+            return Err(QueueError::InvalidState(
+                "worker task names must be safe 1-128 character identifiers".into(),
+            ));
+        }
+    }
+    task_names.sort();
+    if task_names.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(QueueError::InvalidState(
+            "worker task names must not contain duplicates".into(),
+        ));
+    }
+    Ok(task_names)
+}
+
+fn is_safe_task_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_TASK_NAME_BYTES
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':')
+        })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkerAssignment {
     pub task_id: i64,
     pub session_id: String,
+    pub task_name: String,
     pub task_type: String,
 }
 
@@ -228,11 +273,21 @@ impl WorkerCoordinator {
 struct DispatchWorker {
     session_id: String,
     available_slots: i64,
+    task_names: Vec<String>,
+}
+
+impl DispatchWorker {
+    fn supports(&self, task_name: &str) -> bool {
+        self.task_names
+            .binary_search_by(|candidate| candidate.as_str().cmp(task_name))
+            .is_ok()
+    }
 }
 
 #[derive(Debug, Clone)]
 struct PendingTask {
     id: i64,
+    task_name: String,
     task_type: String,
     priority: i64,
     created_at: f64,
@@ -295,6 +350,7 @@ fn dispatch_registered(
                 .push(DispatchWorker {
                     session_id: session.session_id.clone(),
                     available_slots,
+                    task_names: session.task_names.clone(),
                 });
         }
 
@@ -309,22 +365,44 @@ fn dispatch_registered(
                 continue;
             }
 
+            let supported_names: BTreeSet<String> = workers
+                .iter()
+                .flat_map(|worker| worker.task_names.iter().cloned())
+                .collect();
+            if supported_names.is_empty() {
+                continue;
+            }
+
             let tasks = {
-                let mut stmt = tx.prepare(
-                    "SELECT id, task_type, priority, created_at
+                let placeholders = (0..supported_names.len())
+                    .map(|index| format!("?{}", index + 3))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let limit_parameter = supported_names.len() + 3;
+                let sql = format!(
+                    "SELECT id, task_name, task_type, priority, created_at
                      FROM tasks
                      WHERE status = 'PENDING'
                        AND scheduled_at <= ?1
                        AND task_type = ?2
+                       AND task_name IN ({placeholders})
                      ORDER BY priority DESC, id ASC
-                     LIMIT ?3",
-                )?;
-                let mapped = stmt.query_map(params![now, task_type, total_available], |row| {
+                     LIMIT ?{limit_parameter}"
+                );
+                let mut values = Vec::with_capacity(supported_names.len() + 3);
+                values.push(Value::Real(now));
+                values.push(Value::Text(task_type.clone()));
+                values.extend(supported_names.iter().cloned().map(Value::Text));
+                values.push(Value::Integer(total_available));
+
+                let mut stmt = tx.prepare(&sql)?;
+                let mapped = stmt.query_map(params_from_iter(values.iter()), |row| {
                     Ok(PendingTask {
                         id: row.get(0)?,
-                        task_type: row.get(1)?,
-                        priority: row.get(2)?,
-                        created_at: row.get::<_, f64>(3).unwrap_or(now),
+                        task_name: row.get(1)?,
+                        task_type: row.get(2)?,
+                        priority: row.get(3)?,
+                        created_at: row.get::<_, f64>(4).unwrap_or(now),
                     })
                 })?;
                 let mut result = Vec::new();
@@ -338,24 +416,41 @@ fn dispatch_registered(
                 continue;
             }
 
+            let workers: Vec<DispatchWorker> = workers
+                .into_iter()
+                .filter(|worker| tasks.iter().any(|task| worker.supports(&task.task_name)))
+                .collect();
+            if workers.is_empty() {
+                continue;
+            }
+
             let n = tasks.len();
             let m = workers.len();
             let mut cost = Array2::<f64>::zeros((n, m));
+            let mut compatible = Array2::<bool>::from_elem((n, m), false);
             for (i, task) in tasks.iter().enumerate() {
                 let age = (now - task.created_at).clamp(0.0, 300.0);
                 let age_bonus = age * 0.15;
                 let priority_bonus = task.priority as f64 * 1.8;
                 let base_cost = (30.0 - priority_bonus - age_bonus).max(0.5);
-                for j in 0..m {
-                    cost[[i, j]] = base_cost;
+                for (j, worker) in workers.iter().enumerate() {
+                    if worker.supports(&task.task_name) {
+                        compatible[[i, j]] = true;
+                        cost[[i, j]] = base_cost;
+                    } else {
+                        cost[[i, j]] = 1.0e9;
+                    }
                 }
             }
 
+            let effective_available = workers.iter().fold(0i64, |sum, worker| {
+                sum.saturating_add(worker.available_slots)
+            });
             let row_supply = Array1::from_vec(vec![1.0 / n as f64; n]);
             let col_demand = Array1::from_vec(
                 workers
                     .iter()
-                    .map(|worker| worker.available_slots as f64 / total_available as f64)
+                    .map(|worker| worker.available_slots as f64 / effective_available as f64)
                     .collect(),
             );
             let plan =
@@ -364,7 +459,7 @@ fn dispatch_registered(
                 .iter()
                 .map(|worker| worker.available_slots)
                 .collect();
-            let rounded = round_transport_plan_bounded(&plan, &capacities);
+            let rounded = round_transport_plan_bounded(&plan, &capacities, &compatible);
 
             let mut update = tx.prepare(
                 "UPDATE tasks
@@ -375,7 +470,8 @@ fn dispatch_registered(
                      updated_at = ?4
                  WHERE id = ?5
                    AND status = 'PENDING'
-                   AND task_type = ?6",
+                   AND task_type = ?6
+                   AND task_name = ?7",
             )?;
 
             for (index, task) in tasks.iter().enumerate() {
@@ -387,6 +483,9 @@ fn dispatch_registered(
                 let Some(worker) = workers.get(worker_index) else {
                     continue;
                 };
+                if !worker.supports(&task.task_name) {
+                    continue;
+                }
 
                 let affected = update.execute(params![
                     worker.session_id,
@@ -394,12 +493,14 @@ fn dispatch_registered(
                     now,
                     now,
                     task.id,
-                    task.task_type
+                    task.task_type,
+                    task.task_name,
                 ])?;
                 if affected == 1 {
                     assignments_out.push(WorkerAssignment {
                         task_id: task.id,
                         session_id: worker.session_id.clone(),
+                        task_name: task.task_name.clone(),
                         task_type: task.task_type.clone(),
                     });
                 }
@@ -558,8 +659,15 @@ fn sinkhorn_knopp_log_domain(
     plan
 }
 
-fn round_transport_plan_bounded(plan: &Array2<f64>, capacities: &[i64]) -> Vec<i32> {
+fn round_transport_plan_bounded(
+    plan: &Array2<f64>,
+    capacities: &[i64],
+    compatible: &Array2<bool>,
+) -> Vec<i32> {
     let (n, m) = plan.dim();
+    if compatible.dim() != (n, m) || capacities.len() != m {
+        return vec![-1; n];
+    }
     let mut remaining: Vec<usize> = capacities
         .iter()
         .map(|value| (*value).max(0) as usize)
@@ -571,7 +679,7 @@ fn round_transport_plan_bounded(plan: &Array2<f64>, capacities: &[i64]) -> Vec<i
     for i in 0..n {
         for j in 0..m {
             let score = plan[[i, j]];
-            if score.is_finite() && remaining[j] > 0 {
+            if compatible[[i, j]] && score.is_finite() && remaining[j] > 0 {
                 candidates.push((score, i, j));
             }
         }
@@ -585,6 +693,32 @@ fn round_transport_plan_bounded(plan: &Array2<f64>, capacities: &[i64]) -> Vec<i
             remaining[worker] -= 1;
         }
     }
+
+    let mut unresolved: Vec<usize> = (0..n).filter(|index| !assigned[*index]).collect();
+    unresolved.sort_by_key(|task| {
+        (
+            (0..m).filter(|worker| compatible[[*task, *worker]]).count(),
+            *task,
+        )
+    });
+    for task in unresolved {
+        let mut best: Option<(usize, usize)> = None;
+        for worker in 0..m {
+            if !compatible[[task, worker]] || remaining[worker] == 0 {
+                continue;
+            }
+            let candidate = (remaining[worker], worker);
+            if best.is_none_or(|current| candidate > current) {
+                best = Some(candidate);
+            }
+        }
+        if let Some((_, worker)) = best {
+            assignment[task] = worker as i32;
+            assigned[task] = true;
+            remaining[worker] -= 1;
+        }
+    }
+
     assignment
 }
 
@@ -599,12 +733,22 @@ mod tests {
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
     }
 
+    fn names(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
     #[test]
     fn session_authentication_is_bounded_and_restart_revokes_same_worker_label() {
         let registry = WorkerRegistry::new(Duration::from_secs(10)).unwrap();
         let start = Instant::now();
         let first = registry
-            .register_at("worker-a".into(), WorkerKind::Cpu, 2, start)
+            .register_at(
+                "worker-a".into(),
+                WorkerKind::Cpu,
+                2,
+                names(&["document.process"]),
+                start,
+            )
             .unwrap();
 
         assert!(registry
@@ -629,6 +773,7 @@ mod tests {
                 "worker-a".into(),
                 WorkerKind::Cpu,
                 2,
+                names(&["document.process"]),
                 start + Duration::from_secs(2),
             )
             .unwrap();
@@ -652,7 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_dispatch_never_crosses_worker_capability_and_respects_capacity() {
+    fn strict_dispatch_requires_exact_task_name_and_respects_capacity() {
         let db_path = std::env::temp_dir().join(format!(
             "worker_protocol_dispatch_{}.db",
             rand::random::<u64>()
@@ -666,19 +811,25 @@ mod tests {
         let gpu = queue.enqueue_simple("gpu-1", "gpu", "gpu-secret").unwrap();
 
         let registry = WorkerRegistry::new(Duration::from_secs(60)).unwrap();
-        let gpu_registration = registry.register("gpu-worker", WorkerKind::Gpu, 1).unwrap();
+        let gpu_registration = registry
+            .register("gpu-worker", WorkerKind::Gpu, 1, names(&["gpu-1"]))
+            .unwrap();
         let first =
             dispatch_registered(&db_path, registry.active_sessions().unwrap(), 1.5, 30.0).unwrap();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].task_id, gpu);
+        assert_eq!(first[0].task_name, "gpu-1");
         assert_eq!(first[0].task_type, "gpu");
         assert_eq!(first[0].session_id, gpu_registration.session.session_id);
 
-        let cpu_registration = registry.register("cpu-worker", WorkerKind::Cpu, 1).unwrap();
+        let cpu_registration = registry
+            .register("cpu-worker", WorkerKind::Cpu, 1, names(&["cpu-1"]))
+            .unwrap();
         let second =
             dispatch_registered(&db_path, registry.active_sessions().unwrap(), 1.5, 30.0).unwrap();
         assert_eq!(second.len(), 1);
-        assert!(second[0].task_id == cpu_1 || second[0].task_id == cpu_2);
+        assert_eq!(second[0].task_id, cpu_1);
+        assert_eq!(second[0].task_name, "cpu-1");
         assert_eq!(second[0].task_type, "cpu");
         assert_eq!(second[0].session_id, cpu_registration.session.session_id);
 
@@ -697,13 +848,39 @@ mod tests {
         .unwrap();
         assert_eq!(remaining_cpu, 1);
 
+        let cpu_2_registration = registry
+            .register("cpu-worker-2", WorkerKind::Cpu, 1, names(&["cpu-2"]))
+            .unwrap();
+        let fourth =
+            dispatch_registered(&db_path, registry.active_sessions().unwrap(), 1.5, 30.0).unwrap();
+        assert_eq!(fourth.len(), 1);
+        assert_eq!(fourth[0].task_id, cpu_2);
+        assert_eq!(fourth[0].task_name, "cpu-2");
+        assert_eq!(fourth[0].session_id, cpu_2_registration.session.session_id);
+
         cleanup(&db_path);
     }
 
     #[test]
-    fn registration_rejects_non_positive_capacity() {
+    fn registration_rejects_invalid_exact_task_name_sets() {
         let registry = WorkerRegistry::new(Duration::from_secs(1)).unwrap();
-        assert!(registry.register("worker", WorkerKind::Cpu, 0).is_err());
+        assert!(registry
+            .register("worker", WorkerKind::Cpu, 0, names(&["cpu.task"]))
+            .is_err());
+        assert!(registry
+            .register("worker", WorkerKind::Cpu, 1, Vec::new())
+            .is_err());
+        assert!(registry
+            .register(
+                "worker",
+                WorkerKind::Cpu,
+                1,
+                names(&["cpu.task", "cpu.task"]),
+            )
+            .is_err());
+        assert!(registry
+            .register("worker", WorkerKind::Cpu, 1, names(&["cpu/task"]))
+            .is_err());
     }
 
     #[test]
@@ -715,7 +892,9 @@ mod tests {
         queue.enqueue_simple("cpu", "cpu", "{}").unwrap();
 
         let registry = WorkerRegistry::new(Duration::from_secs(60)).unwrap();
-        let registration = registry.register("worker", WorkerKind::Cpu, 1).unwrap();
+        let registration = registry
+            .register("worker", WorkerKind::Cpu, 1, names(&["cpu"]))
+            .unwrap();
         DatabaseManager::execute_with_retry(&db_path, |conn| {
             conn.execute(
                 "INSERT INTO tasks (task_name, task_type, payload, status, priority, max_retries, retry_count, scheduled_at, created_at, updated_at, locked_by)
@@ -729,6 +908,7 @@ mod tests {
         let assigned =
             dispatch_registered(&db_path, registry.active_sessions().unwrap(), 1.5, 30.0).unwrap();
         assert_eq!(assigned.len(), 1);
+        assert_eq!(assigned[0].task_name, "cpu");
 
         cleanup(&db_path);
     }
