@@ -2,6 +2,7 @@ import { TokenBucketAdmissionController } from "./admission";
 import { handleRequest, MAX_PUBLIC_REQUEST_BYTES } from "./app";
 import { loadGatewayConfig } from "./config";
 import { TASK_REGISTRY } from "./registry";
+import { handleDeclaredWorkflowResultRequest } from "./workflow-results";
 import { handlePublicWorkflowRequest } from "./workflows";
 
 const config = loadGatewayConfig();
@@ -21,6 +22,8 @@ const server = Bun.serve({
   maxRequestBodySize: MAX_PUBLIC_REQUEST_BYTES,
   idleTimeout: 10,
   async fetch(request) {
+    const declaredResult = await handleDeclaredWorkflowResultRequest(request, dependencies);
+    if (declaredResult) return declaredResult;
     const workflowResponse = await handlePublicWorkflowRequest(request, dependencies);
     return workflowResponse ?? handleRequest(request, dependencies);
   },

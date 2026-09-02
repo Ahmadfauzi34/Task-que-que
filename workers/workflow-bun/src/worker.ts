@@ -3,9 +3,9 @@ import {
   type WorkerHandler,
 } from "../../document-bun/src/registry";
 import { runWorker, type WorkerConfig } from "../../document-bun/src/worker";
+import { executeWorkflowWithDeclaredOutputs } from "./declared-outputs";
 import {
   WorkflowPayloadError,
-  executeWorkflow,
   validateWorkflowGatewayConfig,
   writeWorkflowResultAtomic,
   type WorkflowGatewayConfig,
@@ -125,7 +125,11 @@ export function createWorkflowWorkerRegistry(
     taskType: "workflow",
 
     async handle(task, context) {
-      const result = await executeWorkflow(task.task_id, task.payload, validated);
+      const result = await executeWorkflowWithDeclaredOutputs(
+        task.task_id,
+        task.payload,
+        validated,
+      );
       await writeWorkflowResultAtomic(context.outputDir, result);
       return result;
     },
