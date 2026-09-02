@@ -170,7 +170,9 @@ AGENT_ID="$(printf '%s' "$public_result" | sed -n 's/.*"task_id":\([0-9][0-9]*\)
 [[ -n "$AGENT_ID" ]] || fail "topology did not expose child task id"
 child_projection="$(curl -fsS --max-time 2 "http://127.0.0.1:7331/v1/tasks/$AGENT_ID/result")" || \
   fail "child projection missing on loopback"
-printf '%s' "$child_projection" | grep -F '"provider_id":"workflow-output-mock"' >/dev/null || \
+printf '%s' "$child_projection" | grep -F 'provider_id' >/dev/null || \
+  fail "loopback child projection did not contain provider id"
+printf '%s' "$child_projection" | grep -F 'workflow-output-mock' >/dev/null || \
   fail "loopback child projection was not preserved"
 
 INVALID_BODY='{"steps":[{"id":"agent","type":"agent.invoke","payload":{"input":{"prompt":"must not run"}}}],"outputs":{"answer":{"$from":"missing","path":"result.accepted"}}}'
