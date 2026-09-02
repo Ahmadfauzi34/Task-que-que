@@ -57,6 +57,10 @@ export class WorkerHandlerRegistry {
     return this.#handlers.size;
   }
 
+  get taskNames(): readonly string[] {
+    return [...this.#handlers.keys()].sort();
+  }
+
   resolve(taskName: string, taskType: string): WorkerHandler | undefined {
     if (taskType !== this.workerType) {
       return undefined;
