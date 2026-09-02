@@ -2,6 +2,13 @@ import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { RegistryTask, WorkerHandler } from "../../document-bun/src/registry";
+import {
+  WorkflowResultReadError,
+  WorkflowResultReferenceError,
+  normalizeWorkflowResultOrigin,
+  resolveResultReferences,
+  validateResultReferencePayload,
+} from "./result-reference";
 
 export const MAX_WORKFLOW_PAYLOAD_BYTES = 256 * 1024;
 export const MAX_WORKFLOW_STEPS = 32;
@@ -30,7 +37,11 @@ export interface WorkflowGatewayConfig {
   pollMs: number;
   maxRunMs: number;
   fetchImpl?: typeof fetch;
+  resultOrigin?: string;
+  resultFetchImpl?: typeof fetch;
 }
+
+type ValidatedWorkflowGatewayConfig = WorkflowGatewayConfig & { resultOrigin: string };
 
 export interface WorkflowResult {
   schema_version: 1;
@@ -76,10 +87,7 @@ export function normalizeWorkflowGatewayOrigin(raw: string): string {
   const url = new URL(raw);
   const host = url.hostname.toLowerCase();
   const loopback =
-    host === "127.0.0.1" ||
-    host === "localhost" ||
-    host === "[::1]" ||
-    host === "::1";
+    host === "127.0.0.1" || host === "localhost" || host === "[::1]" || host === "::1";
 
   if (url.protocol !== "http:" || !loopback) {
     throw new Error("WORKFLOW_GATEWAY_ORIGIN must be a loopback http origin");
@@ -98,8 +106,11 @@ export function normalizeWorkflowGatewayOrigin(raw: string): string {
 
 export function validateWorkflowGatewayConfig(
   config: WorkflowGatewayConfig,
-): WorkflowGatewayConfig {
+): ValidatedWorkflowGatewayConfig {
   const origin = normalizeWorkflowGatewayOrigin(config.origin);
+  const resultOrigin = normalizeWorkflowResultOrigin(
+    config.resultOrigin ?? "http://127.0.0.1:7331",
+  );
   if (
     config.bearerToken.length === 0 ||
     config.bearerToken.length > 4096 ||
@@ -124,7 +135,22 @@ export function validateWorkflowGatewayConfig(
   ) {
     throw new Error("WORKFLOW_MAX_RUN_MS must be between 1000 and 86400000");
   }
-  return { ...config, origin };
+  return { ...config, origin, resultOrigin };
+}
+
+function ancestorsOf(stepId: string, byId: ReadonlyMap<string, WorkflowStep>): Set<string> {
+  const ancestors = new Set<string>();
+  const visit = (currentId: string): void => {
+    const current = byId.get(currentId);
+    if (!current) return;
+    for (const dependency of current.depends_on) {
+      if (ancestors.has(dependency)) continue;
+      ancestors.add(dependency);
+      visit(dependency);
+    }
+  };
+  visit(stepId);
+  return ancestors;
 }
 
 export function parseWorkflowDefinition(raw: string): WorkflowDefinition {
@@ -259,6 +285,17 @@ export function parseWorkflowDefinition(raw: string): WorkflowDefinition {
   };
   for (const step of steps) visit(step.id);
 
+  for (const step of steps) {
+    try {
+      validateResultReferencePayload(step.payload, ancestorsOf(step.id, byId));
+    } catch (error) {
+      if (error instanceof WorkflowResultReferenceError) {
+        throw new WorkflowPayloadError(`workflow step ${step.id}: ${error.message}`);
+      }
+      throw error;
+    }
+  }
+
   return { steps };
 }
 
@@ -268,7 +305,7 @@ interface GatewayJsonResponse {
 }
 
 async function gatewayJson(
-  config: WorkflowGatewayConfig,
+  config: ValidatedWorkflowGatewayConfig,
   path: string,
   init: RequestInit,
 ): Promise<GatewayJsonResponse> {
@@ -303,7 +340,7 @@ async function gatewayJson(
   }
 }
 
-function gatewayHeaders(config: WorkflowGatewayConfig): Record<string, string> {
+function gatewayHeaders(config: ValidatedWorkflowGatewayConfig): Record<string, string> {
   return {
     Authorization: `Bearer ${config.bearerToken}`,
     "Content-Type": "application/json",
@@ -317,7 +354,8 @@ function childIdempotencyKey(workflowTaskId: number, stepId: string): string {
 async function enqueueChild(
   workflowTaskId: number,
   step: WorkflowStep,
-  config: WorkflowGatewayConfig,
+  payload: unknown,
+  config: ValidatedWorkflowGatewayConfig,
 ): Promise<{ taskId: number; replayed: boolean }> {
   const response = await gatewayJson(config, "/v1/tasks", {
     method: "POST",
@@ -327,7 +365,7 @@ async function enqueueChild(
     },
     body: JSON.stringify({
       type: step.type,
-      payload: step.payload,
+      payload,
       ...(step.priority !== undefined ? { priority: step.priority } : {}),
       ...(step.max_retries !== undefined ? { max_retries: step.max_retries } : {}),
     }),
@@ -358,7 +396,7 @@ async function enqueueChild(
 async function getChild(
   taskId: number,
   expectedTaskName: string,
-  config: WorkflowGatewayConfig,
+  config: ValidatedWorkflowGatewayConfig,
 ): Promise<ChildTaskSnapshot> {
   const response = await gatewayJson(config, `/v1/tasks/${taskId}`, {
     method: "GET",
@@ -387,6 +425,51 @@ async function getChild(
   };
 }
 
+function availableAncestorTaskIds(
+  step: WorkflowStep,
+  byId: ReadonlyMap<string, WorkflowStep>,
+  runtime: ReadonlyMap<string, RuntimeStep>,
+): Map<string, number> {
+  const sources = new Map<string, number>();
+  for (const ancestorId of ancestorsOf(step.id, byId)) {
+    const ancestor = runtime.get(ancestorId);
+    if (!ancestor || ancestor.status !== "COMPLETED" || ancestor.taskId === null) {
+      throw new WorkflowExecutionError(
+        `workflow result source ${ancestorId} is not durably completed`,
+      );
+    }
+    sources.set(ancestorId, ancestor.taskId);
+  }
+  return sources;
+}
+
+async function resolveStepPayload(
+  step: WorkflowStep,
+  byId: ReadonlyMap<string, WorkflowStep>,
+  runtime: ReadonlyMap<string, RuntimeStep>,
+  config: ValidatedWorkflowGatewayConfig,
+): Promise<unknown> {
+  try {
+    return await resolveResultReferences(
+      step.payload,
+      availableAncestorTaskIds(step, byId, runtime),
+      {
+        origin: config.resultOrigin,
+        requestTimeoutMs: config.requestTimeoutMs,
+        fetchImpl: config.resultFetchImpl,
+      },
+    );
+  } catch (error) {
+    if (error instanceof WorkflowResultReferenceError) {
+      throw new WorkflowPayloadError(`workflow step ${step.id}: ${error.message}`);
+    }
+    if (error instanceof WorkflowResultReadError) {
+      throw new WorkflowExecutionError(`workflow step ${step.id}: ${error.message}`);
+    }
+    throw error;
+  }
+}
+
 export async function executeWorkflow(
   workflowTaskId: number,
   rawPayload: string,
@@ -396,6 +479,7 @@ export async function executeWorkflow(
     throw new Error("workflow task id must be a positive safe integer");
   }
   const definition = parseWorkflowDefinition(rawPayload);
+  const byId = new Map(definition.steps.map((step) => [step.id, step] as const));
   const config = validateWorkflowGatewayConfig(rawConfig);
   const runtime = new Map<string, RuntimeStep>(
     definition.steps.map((step) => [
@@ -426,7 +510,8 @@ export async function executeWorkflow(
       );
       if (!ready) continue;
 
-      const child = await enqueueChild(workflowTaskId, current.step, config);
+      const payload = await resolveStepPayload(current.step, byId, runtime, config);
+      const child = await enqueueChild(workflowTaskId, current.step, payload, config);
       current.taskId = child.taskId;
       current.status = "PENDING";
       console.log(

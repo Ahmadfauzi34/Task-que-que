@@ -88,6 +88,10 @@ export function loadWorkflowWorkerConfig(
         env.WORKFLOW_GATEWAY_ORIGIN ?? "http://127.0.0.1:3000",
         "WORKFLOW_GATEWAY_ORIGIN",
       ),
+      resultOrigin: normalizeLoopbackOrigin(
+        env.WORKFLOW_RESULT_ORIGIN ?? "http://127.0.0.1:7331",
+        "WORKFLOW_RESULT_ORIGIN",
+      ),
       bearerToken: gatewayToken,
       requestTimeoutMs: positiveInteger(
         env.WORKFLOW_GATEWAY_REQUEST_TIMEOUT_MS,
