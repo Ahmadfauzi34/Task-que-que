@@ -116,4 +116,67 @@ sh ops/termux-reference-machine.sh status
 cat "$HOME/.task-queue/public-url"
 ```
 
-A later Termux:Boot integration should call this same lifecycle entrypoint. Boot automation is a consumer of the reference machine, not a second source of startup truth.
+## Termux:Boot adapter
+
+Termux:Boot is an Android add-on that executes files from `~/.termux/boot/` after boot. Install Termux and Termux:Boot from compatible/trusted sources, then open the Termux:Boot launcher once so Android can deliver future boot events to it. The upstream project documents the same `~/.termux/boot/` directory and executes multiple boot files in filename order.
+
+The Task-que-que integration deliberately keeps Termux:Boot as a consumer of the lifecycle boundary:
+
+```text
+Android BOOT_COMPLETED
+        ↓
+Termux:Boot
+        ↓
+~/.termux/boot/50-task-queue-reference-machine
+        ↓
+ops/termux-boot-entrypoint.sh
+        ↓
+ops/termux-reference-machine.sh
+```
+
+The boot adapter does not start queue/broker/workers directly and does not own stop/restart logic. It first asks the existing lifecycle to establish the local reference machine with public transport disabled. This keeps queue/gateway/broker/workers recoverable even when Android boots before Internet connectivity has returned. It then asks the same lifecycle to attach Cloudflare transport and separately waits for public readiness.
+
+Install the adapter from the checkout that should become the boot reference:
+
+```sh
+TASK_QUEUE_RUST_BIN="$HOME/pr36-bin/robust-sinkhorn-queue-aarch64-linux-android" \
+TASK_QUEUE_WORKER_BIN="$HOME/pr36-bin/robust-sinkhorn-worker-aarch64-linux-android" \
+TASK_QUEUE_BUN_BIN="$HOME/.local/bin/task-queue-bun" \
+sh ops/install-termux-boot.sh
+```
+
+The installer writes only a thin, marked adapter under `~/.termux/boot/`; it refuses to replace a file at that path that is not already one of its own marked adapters. The adapter records paths and bounded retry policy, never the gateway bearer token. Runtime evidence is appended to:
+
+```text
+$HOME/.task-queue/logs/boot.log
+```
+
+Boot-specific controls are references, not hidden platform claims:
+
+```text
+TASK_QUEUE_BOOT_ENABLE_TUNNEL=0|1          default 1
+TASK_QUEUE_BOOT_WAKE_LOCK=0|1              default 0
+TASK_QUEUE_BOOT_TUNNEL_ATTEMPTS            default 6, max 360
+TASK_QUEUE_BOOT_TUNNEL_DELAY_SECONDS       default 5, max 300
+TASK_QUEUE_BOOT_PUBLIC_ATTEMPTS            default 60, max 600
+TASK_QUEUE_BOOT_PUBLIC_DELAY_SECONDS       default 2, max 300
+TASK_QUEUE_BOOT_DIR                        default $HOME/.termux/boot
+TASK_QUEUE_BOOT_SCRIPT_NAME                default 50-task-queue-reference-machine
+```
+
+`TASK_QUEUE_BOOT_WAKE_LOCK=1` requests `termux-wake-lock` when that command is available. Failure to acquire it is logged and is not misreported as success. Power-management policy remains an Android/device concern rather than a queue invariant.
+
+The reference CI smoke test uses a fake lifecycle only to prove the adapter boundary: local-first invocation, bounded tunnel retry, public-readiness convergence, deterministic reinstall, and that no bearer secret is baked into the boot file. A real Android reboot remains the proof obligation for BOOT_COMPLETED delivery and vendor-specific background behavior.
+
+After installing Termux:Boot, opening it once, and installing this adapter, the physical proof is:
+
+```text
+Android reboot
+  -> Termux:Boot invokes adapter
+  -> local reference machine READY
+  -> Cloudflare transport attaches when connectivity permits
+  -> public /readyz READY
+  -> queue.db and gateway-token preserved
+```
+
+Do not infer reboot survival merely from CI or a manual invocation of the boot script. Only an observed Android reboot closes that proof.
