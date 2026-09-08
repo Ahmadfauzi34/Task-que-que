@@ -43,7 +43,12 @@ cat >"$FAKE_BIN_DIR/curl" <<EOF_FAKE_CURL
 #!/usr/bin/env bash
 for arg in "\$@"; do
   case "\$arg" in
-    $FAKE_URL/*) exit 0 ;;
+    $FAKE_URL/*)
+      if [[ "\${FAKE_PUBLIC_READY:-0}" == "1" ]]; then
+        exit 0
+      fi
+      exit 22
+      ;;
   esac
 done
 exec "$REAL_CURL" "\$@"
@@ -63,15 +68,17 @@ lifecycle() {
 
 resume() {
   PATH="$FAKE_BIN_DIR:$PATH" \
+  FAKE_PUBLIC_READY="${FAKE_PUBLIC_READY:-0}" \
   TASK_QUEUE_ROOT_DIR="$ROOT_DIR" \
   TASK_QUEUE_DATA_DIR="$STATE_DIR" \
   TASK_QUEUE_RUST_BIN="$QUEUE_BIN" \
   TASK_QUEUE_WORKER_BIN="$BROKER_BIN" \
   TASK_QUEUE_BUN_BIN="$BUN_BIN" \
   TASK_QUEUE_CLOUDFLARED_BIN="$FAKE_CLOUDFLARED" \
+  TASK_QUEUE_RESUME_PUBLIC_READY_PROBE="${TASK_QUEUE_RESUME_PUBLIC_READY_PROBE:-0}" \
   TASK_QUEUE_RESUME_TUNNEL_ATTEMPTS=2 \
   TASK_QUEUE_RESUME_TUNNEL_DELAY_SECONDS=0 \
-  TASK_QUEUE_RESUME_PUBLIC_ATTEMPTS=3 \
+  TASK_QUEUE_RESUME_PUBLIC_ATTEMPTS="${TASK_QUEUE_RESUME_PUBLIC_ATTEMPTS:-3}" \
   TASK_QUEUE_RESUME_PUBLIC_DELAY_SECONDS=0 \
     sh "$RESUME"
 }
@@ -102,14 +109,16 @@ for name in queue gateway broker cpu-worker workflow-worker vector-worker cloudf
   printf '99999999\n' >"$STATE_DIR/pids/$name.pid"
 done
 
-first_output="$(resume)" || fail "one-command stale recovery failed"
+first_output="$(resume)" || fail "one-command stale recovery failed while public edge stayed unavailable"
 printf '%s\n' "$first_output"
 printf '%s' "$first_output" | grep -F 'queue: clearing stale pid record' >/dev/null \
   || fail "queue stale pid was not recovered"
 printf '%s' "$first_output" | grep -F 'cloudflared: clearing stale pid record' >/dev/null \
   || fail "cloudflared stale pid was not recovered"
-printf '%s' "$first_output" | grep -F 'reference resume: PUBLIC READY' >/dev/null \
-  || fail "resume did not prove public readiness"
+printf '%s' "$first_output" | grep -F 'reference resume: READY local + transport' >/dev/null \
+  || fail "resume did not return transport-attached readiness"
+printf '%s' "$first_output" | grep -F 'public readiness not awaited' >/dev/null \
+  || fail "resume did not expose non-strict public readiness semantics"
 [[ "$(cat "$STATE_DIR/public-url")" == "$FAKE_URL" ]] || fail "resume did not persist public URL"
 
 QUEUE_PID_1="$(cat "$STATE_DIR/pids/queue.pid")"
@@ -149,8 +158,24 @@ CF_PID_2="$(cat "$STATE_DIR/pids/cloudflared.pid")"
 [[ "$CF_PID_2" != "$CF_PID_1" ]] || fail "cloudflared pid did not change after transport recovery"
 [[ "$(cat "$STATE_DIR/pids/queue.pid")" == "$QUEUE_PID_1" ]] || fail "queue pid changed during transport-only recovery"
 
-final_status="$(PATH="$FAKE_BIN_DIR:$PATH" TASK_QUEUE_ROOT_DIR="$ROOT_DIR" TASK_QUEUE_DATA_DIR="$STATE_DIR" TASK_QUEUE_RUST_BIN="$QUEUE_BIN" TASK_QUEUE_WORKER_BIN="$BROKER_BIN" TASK_QUEUE_BUN_BIN="$BUN_BIN" TASK_QUEUE_CLOUDFLARED_BIN="$FAKE_CLOUDFLARED" sh "$LIFECYCLE" status)" \
-  || fail "final reference machine status failed"
+strict_failure_log="$TMP_DIR/strict-failure.log"
+if TASK_QUEUE_RESUME_PUBLIC_READY_PROBE=1 TASK_QUEUE_RESUME_PUBLIC_ATTEMPTS=2 FAKE_PUBLIC_READY=0 \
+    resume >"$strict_failure_log" 2>&1; then
+  fail "strict public mode unexpectedly succeeded while public edge was unavailable"
+fi
+grep -F 'local machine and tunnel are running but public readiness did not converge' "$strict_failure_log" >/dev/null \
+  || fail "strict public failure was not reported clearly"
+[[ "$(cat "$STATE_DIR/pids/queue.pid")" == "$QUEUE_PID_1" ]] || fail "strict public failure restarted or stopped healthy queue"
+[[ "$(cat "$STATE_DIR/pids/cloudflared.pid")" == "$CF_PID_2" ]] || fail "strict public failure restarted or stopped cloudflared"
+
+strict_output="$(TASK_QUEUE_RESUME_PUBLIC_READY_PROBE=1 FAKE_PUBLIC_READY=1 resume)" \
+  || fail "strict public readiness did not converge when the edge became available"
+printf '%s\n' "$strict_output"
+printf '%s' "$strict_output" | grep -F 'reference resume: PUBLIC READY' >/dev/null \
+  || fail "strict resume did not prove public readiness"
+
+final_status="$(PATH="$FAKE_BIN_DIR:$PATH" FAKE_PUBLIC_READY=0 TASK_QUEUE_ROOT_DIR="$ROOT_DIR" TASK_QUEUE_DATA_DIR="$STATE_DIR" TASK_QUEUE_RUST_BIN="$QUEUE_BIN" TASK_QUEUE_WORKER_BIN="$BROKER_BIN" TASK_QUEUE_BUN_BIN="$BUN_BIN" TASK_QUEUE_CLOUDFLARED_BIN="$FAKE_CLOUDFLARED" TASK_QUEUE_PUBLIC_READY_PROBE=0 sh "$LIFECYCLE" status)" \
+  || fail "final reference machine transport-attached status failed"
 printf '%s\n' "$final_status"
 printf '%s' "$final_status" | grep -F 'reference machine: READY' >/dev/null \
   || fail "reference machine not ready after resume proofs"
@@ -160,7 +185,8 @@ echo "single-command stale recovery      : OK"
 echo "dependency-ordered local recovery  : OK"
 echo "healthy process reuse              : OK"
 echo "transport-only recovery            : OK"
-echo "public readiness convergence       : OK"
+echo "slow public edge tolerance         : OK"
+echo "strict public readiness mode       : OK"
 echo "persistent public URL capture      : OK"
 echo "destructive healthy restart        : NOT PERFORMED"
 echo
