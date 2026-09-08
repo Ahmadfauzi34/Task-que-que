@@ -62,6 +62,7 @@ shell_quote() {
 }
 
 require_command sed
+require_command grep
 require_command mkdir
 require_command chmod
 require_command mv
@@ -111,7 +112,7 @@ trap 'rm -f "$tmp"' EXIT HUP INT TERM
   printf 'export TASK_QUEUE_BOOT_TUNNEL_DELAY_SECONDS=%s\n' "$(shell_quote "$TUNNEL_DELAY_SECONDS")"
   printf 'export TASK_QUEUE_BOOT_PUBLIC_ATTEMPTS=%s\n' "$(shell_quote "$PUBLIC_ATTEMPTS")"
   printf 'export TASK_QUEUE_BOOT_PUBLIC_DELAY_SECONDS=%s\n' "$(shell_quote "$PUBLIC_DELAY_SECONDS")"
-  printf 'exec %s\n' "$(shell_quote "$ENTRYPOINT")"
+  printf 'exec sh %s\n' "$(shell_quote "$ENTRYPOINT")"
 } > "$tmp"
 
 chmod 700 "$tmp"
