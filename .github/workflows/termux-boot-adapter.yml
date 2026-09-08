@@ -1,0 +1,30 @@
+name: Termux Boot Adapter
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  adapter-boundary:
+    name: Boot Adapter Boundary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate shell syntax
+        shell: bash
+        run: |
+          sh -n ops/termux-boot-entrypoint.sh
+          sh -n ops/install-termux-boot.sh
+          bash -n tests/reference-termux-boot-adapter-smoke.sh
+
+      - name: Prove adapter contract
+        shell: bash
+        run: timeout 30s bash tests/reference-termux-boot-adapter-smoke.sh
