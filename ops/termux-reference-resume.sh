@@ -8,7 +8,7 @@ LIFECYCLE="$ROOT_DIR/ops/termux-reference-machine.sh"
 ENABLE_TUNNEL="${TASK_QUEUE_RESUME_ENABLE_TUNNEL:-1}"
 TUNNEL_ATTEMPTS="${TASK_QUEUE_RESUME_TUNNEL_ATTEMPTS:-6}"
 TUNNEL_DELAY_SECONDS="${TASK_QUEUE_RESUME_TUNNEL_DELAY_SECONDS:-5}"
-PUBLIC_READY_PROBE="${TASK_QUEUE_RESUME_PUBLIC_READY_PROBE:-1}"
+PUBLIC_READY_PROBE="${TASK_QUEUE_RESUME_PUBLIC_READY_PROBE:-0}"
 PUBLIC_ATTEMPTS="${TASK_QUEUE_RESUME_PUBLIC_ATTEMPTS:-60}"
 PUBLIC_DELAY_SECONDS="${TASK_QUEUE_RESUME_PUBLIC_DELAY_SECONDS:-2}"
 
@@ -83,7 +83,16 @@ done
 
 if [ "$PUBLIC_READY_PROBE" = "0" ]; then
   run_lifecycle 1 0 status || fail "reference machine is not ready after tunnel attach"
-  printf 'reference resume: READY transport-attached; public probe disabled\n'
+  public_url=""
+  if [ -s "$DATA_DIR/public-url" ]; then
+    public_url="$(sed -n '1p' "$DATA_DIR/public-url")"
+  fi
+  if [ -n "$public_url" ]; then
+    printf 'reference resume: READY local + transport %s\n' "$public_url"
+  else
+    printf 'reference resume: READY local + transport\n'
+  fi
+  printf 'reference resume: public readiness not awaited; set TASK_QUEUE_RESUME_PUBLIC_READY_PROBE=1 for strict public convergence\n'
   exit 0
 fi
 
