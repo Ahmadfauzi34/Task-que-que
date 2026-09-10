@@ -1,4 +1,5 @@
 pub mod cancellation;
+pub mod fs_mutation;
 pub mod idempotency;
 pub mod lease_fence;
 pub mod local_api;
