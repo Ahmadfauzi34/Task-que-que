@@ -168,6 +168,20 @@ describe("D5 scoped read-only filesystem provider", () => {
     expect(await symlinkEscape.text()).toContain("filesystem_escape");
   });
 
+  test("rejects a configured root that canonicalizes to the host filesystem root", async () => {
+    const base = await mkdtemp(join(tmpdir(), "tqq-fs-root-alias-"));
+    const rootAlias = join(base, "root-link");
+    await symlink("/", rootAlias);
+    cleanupPaths.push(base);
+
+    const response = await routeGatewayRequest(
+      request("/v1/filesystem/list", "root-secret", "."),
+      dependencies(rootAlias),
+    );
+    expect(response.status).toBe(503);
+    expect(await response.text()).toContain("filesystem_unavailable");
+  });
+
   test("fails closed when the filesystem provider is not configured", async () => {
     const response = await routeGatewayRequest(
       request("/v1/filesystem/list", "root-secret", "."),
