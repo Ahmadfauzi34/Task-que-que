@@ -3,7 +3,7 @@ use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::path::{Component, Path};
+use std::path::Path;
 use thiserror::Error;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -37,14 +37,14 @@ mod sys {
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 compile_error!("fd-relative filesystem mutation substrate currently supports Linux and Android only");
 
-const MAX_RELATIVE_PATH_BYTES: usize = 4096;
+const MAX_PATH_BYTES: usize = 4096;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum MutationError {
     #[error("root must be an absolute non-root path without symlink components")]
     InvalidRoot,
-    #[error("path must be a bounded relative path without '.', '..', empty, or NUL components")]
+    #[error("path must be a bounded relative path without '.', '..', empty, backslash, or NUL components")]
     InvalidPath,
     #[error("write payload exceeds 1 MiB")]
     PayloadTooLarge,
@@ -54,8 +54,47 @@ pub enum MutationError {
     Io(#[from] io::Error),
 }
 
-fn cstring(value: &str) -> Result<CString, MutationError> {
-    CString::new(value).map_err(|_| MutationError::InvalidPath)
+fn invalid_path(absolute: bool) -> MutationError {
+    if absolute {
+        MutationError::InvalidRoot
+    } else {
+        MutationError::InvalidPath
+    }
+}
+
+fn strict_components(path: &Path, absolute: bool) -> Result<Vec<CString>, MutationError> {
+    let raw = path.to_str().ok_or_else(|| invalid_path(absolute))?;
+    if raw.is_empty()
+        || raw.as_bytes().len() > MAX_PATH_BYTES
+        || raw.as_bytes().contains(&0)
+        || raw.contains('\\')
+    {
+        return Err(invalid_path(absolute));
+    }
+
+    let body = if absolute {
+        if !raw.starts_with('/') || raw == "/" {
+            return Err(MutationError::InvalidRoot);
+        }
+        &raw[1..]
+    } else {
+        if raw.starts_with('/') {
+            return Err(MutationError::InvalidPath);
+        }
+        raw
+    };
+
+    let mut output = Vec::new();
+    for segment in body.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(invalid_path(absolute));
+        }
+        output.push(CString::new(segment).map_err(|_| invalid_path(absolute))?);
+    }
+    if output.is_empty() {
+        return Err(invalid_path(absolute));
+    }
+    Ok(output)
 }
 
 fn open_path_dir_at(parent: RawFd, name: &CStr) -> io::Result<OwnedFd> {
@@ -99,58 +138,6 @@ fn open_host_root() -> io::Result<OwnedFd> {
         return Err(io::Error::last_os_error());
     }
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
-fn strict_components(path: &Path, absolute: bool) -> Result<Vec<CString>, MutationError> {
-    let raw = path.to_str().ok_or(if absolute {
-        MutationError::InvalidRoot
-    } else {
-        MutationError::InvalidPath
-    })?;
-    if raw.as_bytes().len() > MAX_RELATIVE_PATH_BYTES || raw.as_bytes().contains(&0) {
-        return Err(if absolute {
-            MutationError::InvalidRoot
-        } else {
-            MutationError::InvalidPath
-        });
-    }
-
-    let mut output = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir if absolute => {}
-            Component::Normal(value) => {
-                let text = value.to_str().ok_or(if absolute {
-                    MutationError::InvalidRoot
-                } else {
-                    MutationError::InvalidPath
-                })?;
-                if text.is_empty() {
-                    return Err(if absolute {
-                        MutationError::InvalidRoot
-                    } else {
-                        MutationError::InvalidPath
-                    });
-                }
-                output.push(cstring(text)?);
-            }
-            _ => {
-                return Err(if absolute {
-                    MutationError::InvalidRoot
-                } else {
-                    MutationError::InvalidPath
-                });
-            }
-        }
-    }
-    if output.is_empty() {
-        return Err(if absolute {
-            MutationError::InvalidRoot
-        } else {
-            MutationError::InvalidPath
-        });
-    }
-    Ok(output)
 }
 
 fn open_root(root: &Path) -> Result<OwnedFd, MutationError> {
@@ -325,6 +312,17 @@ mod tests {
         assert!(matches!(probe_root(Path::new("/")), Err(MutationError::InvalidRoot)));
         symlink(&fixture.root, fixture.base.join("root-link")).unwrap();
         assert!(probe_root(&fixture.base.join("root-link")).is_err());
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_normalized_away_path_segments() {
+        let fixture = Fixture::new();
+        for path in ["./file", "nested//file", "nested/./file", "nested/../file", "nested/"] {
+            assert!(matches!(
+                atomic_write(&fixture.root, Path::new(path), b"no\n"),
+                Err(MutationError::InvalidPath)
+            ));
+        }
     }
 
     #[test]
