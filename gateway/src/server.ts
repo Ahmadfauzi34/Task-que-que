@@ -1,10 +1,8 @@
 import { TokenBucketAdmissionController } from "./admission";
-import { handleRequest, MAX_PUBLIC_REQUEST_BYTES } from "./app";
-import { handleCapabilityRequest } from "./capability-api";
+import { MAX_PUBLIC_REQUEST_BYTES } from "./app";
 import { loadGatewayConfig } from "./config";
 import { TASK_REGISTRY } from "./registry";
-import { handleDeclaredWorkflowResultRequest } from "./workflow-results";
-import { handlePublicWorkflowRequest } from "./workflows";
+import { routeGatewayRequest } from "./router";
 
 const config = loadGatewayConfig();
 const admissionController = new TokenBucketAdmissionController(
@@ -23,12 +21,7 @@ const server = Bun.serve({
   maxRequestBodySize: MAX_PUBLIC_REQUEST_BYTES,
   idleTimeout: 10,
   async fetch(request) {
-    const capabilityResponse = await handleCapabilityRequest(request, dependencies);
-    if (capabilityResponse) return capabilityResponse;
-    const declaredResult = await handleDeclaredWorkflowResultRequest(request, dependencies);
-    if (declaredResult) return declaredResult;
-    const workflowResponse = await handlePublicWorkflowRequest(request, dependencies);
-    return workflowResponse ?? handleRequest(request, dependencies);
+    return routeGatewayRequest(request, dependencies);
   },
   error(error) {
     console.error("gateway request failure", error);
@@ -49,5 +42,6 @@ console.log(`auth   : ${config.allowUnauthenticated ? "explicitly disabled" : "b
 console.log(`tasks  : ${Object.keys(TASK_REGISTRY).join(", ") || "none"}`);
 console.log(`enqueue: ${config.enqueueRatePerSecond}/s, burst ${config.enqueueBurst}`);
 console.log("capability api: /v1/capabilities");
+console.log("capability sessions: /v1/capability-sessions");
 console.log("workflow api: /v1/workflows");
 console.log("status : ready");
