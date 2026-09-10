@@ -5,7 +5,7 @@ export interface GatewayConfig {
   port: number;
   queueDaemonOrigin: string;
   workerBrokerOrigin?: string;
-  filesystemRoot: string | null;
+  filesystemRoot?: string | null;
   apiToken: string | null;
   allowUnauthenticated: boolean;
   upstreamTimeoutMs: number;
