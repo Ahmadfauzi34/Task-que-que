@@ -96,6 +96,13 @@ async function canonicalRoot(root: string | null | undefined): Promise<string> {
 
   try {
     const canonical = await realpath(root);
+    if (canonical === sep) {
+      throw new FilesystemBoundaryError(
+        503,
+        "filesystem_unavailable",
+        "configured filesystem root resolves to the host filesystem root",
+      );
+    }
     const metadata = await stat(canonical);
     if (!metadata.isDirectory()) {
       throw new FilesystemBoundaryError(
