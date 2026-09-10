@@ -9,4 +9,3 @@ ndarray = "0.15"
 thiserror = "1"
 rand = "0.8"
 tokio = { version = "1", features = ["full"] }
-libc = "0.2"
