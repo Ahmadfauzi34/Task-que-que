@@ -2,6 +2,7 @@ export interface GatewayConfig {
   hostname: string;
   port: number;
   queueDaemonOrigin: string;
+  workerBrokerOrigin?: string;
   apiToken: string | null;
   allowUnauthenticated: boolean;
   upstreamTimeoutMs: number;
@@ -13,6 +14,7 @@ export interface GatewayConfig {
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 3000;
 const DEFAULT_QUEUE_DAEMON = "http://127.0.0.1:7331";
+export const DEFAULT_WORKER_BROKER = "http://127.0.0.1:7332";
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 3_000;
 const DEFAULT_ENQUEUE_RATE_PER_SECOND = 10;
 const DEFAULT_ENQUEUE_BURST = 20;
@@ -43,18 +45,18 @@ function assertLoopbackHostname(hostname: string, name: string): void {
   }
 }
 
-function parseQueueDaemonOrigin(raw: string): string {
+function parseLoopbackOrigin(raw: string, name: string): string {
   const url = new URL(raw);
 
   if (url.protocol !== "http:") {
-    throw new Error("QUEUE_DAEMON_URL must use plain HTTP on loopback");
+    throw new Error(`${name} must use plain HTTP on loopback`);
   }
-  assertLoopbackHostname(url.hostname, "QUEUE_DAEMON_URL hostname");
+  assertLoopbackHostname(url.hostname, `${name} hostname`);
   if (url.username || url.password) {
-    throw new Error("QUEUE_DAEMON_URL must not contain credentials");
+    throw new Error(`${name} must not contain credentials`);
   }
   if (url.pathname !== "/" || url.search || url.hash) {
-    throw new Error("QUEUE_DAEMON_URL must be an origin without path, query, or fragment");
+    throw new Error(`${name} must be an origin without path, query, or fragment`);
   }
 
   return url.origin;
@@ -108,8 +110,13 @@ export function loadGatewayConfig(
   return {
     hostname,
     port,
-    queueDaemonOrigin: parseQueueDaemonOrigin(
+    queueDaemonOrigin: parseLoopbackOrigin(
       env.QUEUE_DAEMON_URL?.trim() || DEFAULT_QUEUE_DAEMON,
+      "QUEUE_DAEMON_URL",
+    ),
+    workerBrokerOrigin: parseLoopbackOrigin(
+      env.WORKER_BROKER_URL?.trim() || DEFAULT_WORKER_BROKER,
+      "WORKER_BROKER_URL",
     ),
     apiToken,
     allowUnauthenticated,
