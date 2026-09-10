@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use std::process;
 use std::time::Duration;
 
+use robust_sinkhorn_queue::provider_api::serve_worker_connection_with_provider_snapshot;
 use robust_sinkhorn_queue::tokio_queue::AsyncRobustSinkhornQueue;
 use robust_sinkhorn_queue::value::{Epsilon, LeaseDuration};
-use robust_sinkhorn_queue::worker_api::{serve_worker_connection, WorkerApiState};
+use robust_sinkhorn_queue::worker_api::WorkerApiState;
 use robust_sinkhorn_queue::worker_protocol::{WorkerCoordinator, WorkerRegistry};
 use robust_sinkhorn_queue::{QueueError, QueueResult};
 use tokio::net::TcpListener;
@@ -208,7 +209,7 @@ async fn run_serve(
     let task_lease = LeaseDuration::new(task_lease_duration)?;
     let coordinator =
         WorkerCoordinator::new(&db_path, registry.clone(), Epsilon::new(1.5)?, task_lease);
-    let api_state = WorkerApiState::new(queue.clone(), &db_path, registry, task_lease);
+    let api_state = WorkerApiState::new(queue.clone(), &db_path, registry.clone(), task_lease);
 
     let listener = TcpListener::bind(listen_addr).await.map_err(|error| {
         QueueError::InvalidState(format!(
@@ -265,8 +266,9 @@ async fn run_serve(
                     continue;
                 }
                 let state = api_state.clone();
+                let registry = registry.clone();
                 connections.spawn(async move {
-                    let result = serve_worker_connection(stream, state).await;
+                    let result = serve_worker_connection_with_provider_snapshot(stream, state, registry).await;
                     (peer, result)
                 });
             }
@@ -299,7 +301,7 @@ fn print_help() {
 Usage:\n  robust-sinkhorn-worker <command> [options]\n\n\
 Commands:\n  serve    Run the loopback-only worker broker\n  version  Print the binary version\n  help     Print this help\n\n\
 Serve options:\n  --db <path>                    Queue database path (default: queue.db)\n  --listen <loopback-ip:port>    Worker API address (default: 127.0.0.1:7332)\n  --dispatch-interval-ms <n>     Strict dispatch cadence (default: 250)\n  --session-ttl-ms <n>           Worker session TTL (default: 60000)\n  --task-lease-ms <n>            Fenced task lease (default: 30000)\n\n\
-Worker API:\n  GET  /healthz\n  GET  /readyz\n  POST /v1/register\n  POST /v1/session/heartbeat\n  POST /v1/claim\n  POST /v1/task/heartbeat\n  POST /v1/task/complete\n  POST /v1/task/fail\n\n\
+Worker API:\n  GET  /healthz\n  GET  /readyz\n  GET  /v1/providers\n  POST /v1/register\n  POST /v1/session/heartbeat\n  POST /v1/claim\n  POST /v1/task/heartbeat\n  POST /v1/task/complete\n  POST /v1/task/fail\n\n\
 The worker API is a local data-plane. Do not expose port 7332 through Bun, Cloudflare, or router NAT.",
         version = env!("CARGO_PKG_VERSION")
     );
