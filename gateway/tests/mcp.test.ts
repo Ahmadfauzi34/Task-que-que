@@ -13,6 +13,7 @@ const config: GatewayConfig = {
   hostname: "127.0.0.1",
   port: 3000,
   queueDaemonOrigin: "http://127.0.0.1:7331",
+  workerBrokerOrigin: "http://127.0.0.1:7332",
   apiToken: "test-secret",
   allowUnauthenticated: false,
   upstreamTimeoutMs: 1_000,
@@ -25,13 +26,35 @@ const admissionController: AdmissionController = {
   tryAcquire: () => ({ allowed: true, retryAfterSeconds: 0 }),
 };
 
-function dependencies(fetchImpl?: FetchLike): GatewayDependencies {
+const DEFAULT_ACTIVE_TASKS = [
+  "document.process",
+  "hash.compute",
+  "vector.dot",
+  "workflow.run",
+] as const;
+
+function providerSnapshot(activeTaskNames: readonly string[]): FetchLike {
+  return async () => new Response(
+    JSON.stringify({
+      schema_version: 1,
+      active_task_names: [...activeTaskNames],
+      worker_types: [],
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
+function dependencies(
+  fetchImpl?: FetchLike,
+  activeTaskNames: readonly string[] = DEFAULT_ACTIVE_TASKS,
+): GatewayDependencies {
   return {
     config,
     registry: TASK_REGISTRY,
     admissionController,
     ...(fetchImpl ? { fetchImpl } : {}),
-  };
+    providerFetchImpl: providerSnapshot(activeTaskNames),
+  } as GatewayDependencies;
 }
 
 function paramsMeta(version = MCP_PROTOCOL_VERSION) {
@@ -64,7 +87,9 @@ function mcpRequest(
     "mcp-protocol-version": version,
     "mcp-method": options.methodHeader ?? method,
   });
-  if (options.nameHeader !== undefined) headers.set("mcp-name", options.nameHeader);
+  if (options.nameHeader !== undefined) {
+    headers.set("mcp-name", options.nameHeader);
+  }
   if (options.origin !== undefined) headers.set("origin", options.origin);
   return new Request("http://gateway.internal/mcp", {
     method: "POST",
@@ -81,7 +106,10 @@ function mcpRequest(
   });
 }
 
-async function dispatch(request: Request, deps: GatewayDependencies): Promise<Response> {
+async function dispatch(
+  request: Request,
+  deps: GatewayDependencies,
+): Promise<Response> {
   const response = await handleMcpRequest(
     request,
     deps,
@@ -159,7 +187,9 @@ describe("MCP 2026-07-28 transport boundary", () => {
 
   test("validates Origin when a browser-like caller supplies one", async () => {
     const response = await dispatch(
-      mcpRequest("server/discover", {}, "test-secret", { origin: "https://attacker.example" }),
+      mcpRequest("server/discover", {}, "test-secret", {
+        origin: "https://attacker.example",
+      }),
       dependencies(),
     );
     expect(response.status).toBe(403);
@@ -167,7 +197,7 @@ describe("MCP 2026-07-28 transport boundary", () => {
 });
 
 describe("MCP capability projection", () => {
-  test("lists only tools reachable through the signed session grant", async () => {
+  test("lists only tools reachable through the signed session grant and live providers", async () => {
     const session = await issueCapabilitySession(
       "test-secret",
       {
@@ -194,6 +224,51 @@ describe("MCP capability projection", () => {
     const genericSubmit = tools.find((tool) => tool.name === "task.submit");
     expect(genericSubmit.inputSchema.properties.type.enum).toEqual(["document.process"]);
     expect(body.result.cacheScope).toBe("private");
+  });
+
+  test("does not advertise authorized agent.invoke while its provider session is absent", async () => {
+    const response = await dispatch(mcpRequest("tools/list", {}), dependencies());
+    const names = (await json(response)).result.tools.map(
+      (tool: Record<string, unknown>) => tool.name,
+    );
+    expect(names).not.toContain("agent.invoke");
+
+    const withRemote = await dispatch(
+      mcpRequest("tools/list", {}),
+      dependencies(undefined, [...DEFAULT_ACTIVE_TASKS, "agent.invoke"]),
+    );
+    const liveNames = (await json(withRemote)).result.tools.map(
+      (tool: Record<string, unknown>) => tool.name,
+    );
+    expect(liveNames).toContain("agent.invoke");
+  });
+
+  test("keeps authorization and runtime availability distinct in system.capabilities", async () => {
+    const response = await dispatch(
+      mcpRequest(
+        "tools/call",
+        { name: "system.capabilities", arguments: {} },
+        "test-secret",
+        { nameHeader: "system.capabilities" },
+      ),
+      dependencies(),
+    );
+    expect(response.status).toBe(200);
+    const body = await json(response);
+    const remoteAgent = body.result.structuredContent.capabilities.find(
+      (entry: Record<string, unknown>) => entry.name === "agent.invoke",
+    );
+    expect(remoteAgent.accessible).toBe(true);
+    expect(remoteAgent.authorized).toBe(true);
+    expect(remoteAgent.available).toBe(false);
+    expect(remoteAgent.executable).toBe(false);
+
+    const document = body.result.structuredContent.capabilities.find(
+      (entry: Record<string, unknown>) => entry.name === "document.process",
+    );
+    expect(document.authorized).toBe(true);
+    expect(document.available).toBe(true);
+    expect(document.executable).toBe(true);
   });
 
   test("keeps deeper locked capabilities visible through system.capabilities", async () => {
@@ -223,6 +298,9 @@ describe("MCP capability projection", () => {
       (entry: Record<string, unknown>) => entry.name === "agent.invoke",
     );
     expect(remoteAgent.accessible).toBe(false);
+    expect(remoteAgent.authorized).toBe(false);
+    expect(remoteAgent.available).toBe(false);
+    expect(remoteAgent.executable).toBe(false);
     expect(remoteAgent.blocked_by).toEqual(["depth", "authority", "scope"]);
   });
 });
@@ -281,7 +359,30 @@ describe("MCP tool calls reuse the proven gateway path", () => {
     expect(rustAuthorization).toBeNull();
   });
 
-  test("rejects an unavailable tool and malformed arguments before gateway I/O", async () => {
+  test("rejects an unavailable provider before gateway or queue I/O", async () => {
+    let called = false;
+    const deps = dependencies(async () => {
+      called = true;
+      return new Response();
+    });
+
+    const response = await dispatch(
+      mcpRequest(
+        "tools/call",
+        {
+          name: "agent.invoke",
+          arguments: { payload: {}, idempotency_key: "remote-offline" },
+        },
+        "test-secret",
+        { nameHeader: "agent.invoke" },
+      ),
+      deps,
+    );
+    expect((await json(response)).error.code).toBe(-32602);
+    expect(called).toBe(false);
+  });
+
+  test("rejects an unauthorized tool and malformed arguments before gateway I/O", async () => {
     let called = false;
     const deps = dependencies(async () => {
       called = true;
@@ -323,10 +424,15 @@ describe("MCP tool calls reuse the proven gateway path", () => {
 
   test("returns sanitized gateway failures as MCP tool errors instead of protocol failures", async () => {
     const deps = dependencies(async () =>
-      new Response(JSON.stringify({ error: { code: "queue_rejected_task", message: "queue daemon rejected the task" } }), {
-        status: 502,
-        headers: { "content-type": "application/json" },
-      }),
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "queue_rejected_task",
+            message: "queue daemon rejected the task",
+          },
+        }),
+        { status: 502, headers: { "content-type": "application/json" } },
+      ),
     );
     const session = await issueCapabilitySession(
       "test-secret",
