@@ -6,6 +6,37 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Component, Path};
 use thiserror::Error;
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod sys {
+    use std::os::raw::{c_char, c_int, c_uint};
+
+    pub const O_RDONLY: c_int = 0;
+    pub const O_WRONLY: c_int = 0o1;
+    pub const O_CREAT: c_int = 0o100;
+    pub const O_EXCL: c_int = 0o200;
+    pub const O_DIRECTORY: c_int = 0o200000;
+    pub const O_NOFOLLOW: c_int = 0o400000;
+    pub const O_CLOEXEC: c_int = 0o2000000;
+    pub const O_PATH: c_int = 0o10000000;
+
+    unsafe extern "C" {
+        pub fn open(path: *const c_char, flags: c_int, ...) -> c_int;
+        pub fn openat(dirfd: c_int, path: *const c_char, flags: c_int, ...) -> c_int;
+        pub fn fsync(fd: c_int) -> c_int;
+        pub fn unlinkat(dirfd: c_int, pathname: *const c_char, flags: c_int) -> c_int;
+        pub fn renameat(
+            olddirfd: c_int,
+            oldpath: *const c_char,
+            newdirfd: c_int,
+            newpath: *const c_char,
+        ) -> c_int;
+        pub fn mkdirat(dirfd: c_int, pathname: *const c_char, mode: c_uint) -> c_int;
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+compile_error!("fd-relative filesystem mutation substrate currently supports Linux and Android only");
+
 const MAX_RELATIVE_PATH_BYTES: usize = 4096;
 const MAX_WRITE_BYTES: usize = 1024 * 1024;
 
@@ -29,10 +60,10 @@ fn cstring(value: &str) -> Result<CString, MutationError> {
 
 fn open_path_dir_at(parent: RawFd, name: &CStr) -> io::Result<OwnedFd> {
     let fd = unsafe {
-        libc::openat(
+        sys::openat(
             parent,
             name.as_ptr(),
-            libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            sys::O_PATH | sys::O_DIRECTORY | sys::O_NOFOLLOW | sys::O_CLOEXEC,
         )
     };
     if fd < 0 {
@@ -44,10 +75,10 @@ fn open_path_dir_at(parent: RawFd, name: &CStr) -> io::Result<OwnedFd> {
 fn open_readable_parent(parent: RawFd) -> io::Result<OwnedFd> {
     let dot = CStr::from_bytes_with_nul(b".\0").expect("static dot path");
     let fd = unsafe {
-        libc::openat(
+        sys::openat(
             parent,
             dot.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            sys::O_RDONLY | sys::O_DIRECTORY | sys::O_NOFOLLOW | sys::O_CLOEXEC,
         )
     };
     if fd < 0 {
@@ -59,9 +90,9 @@ fn open_readable_parent(parent: RawFd) -> io::Result<OwnedFd> {
 fn open_host_root() -> io::Result<OwnedFd> {
     let slash = CStr::from_bytes_with_nul(b"/\0").expect("static root path");
     let fd = unsafe {
-        libc::open(
+        sys::open(
             slash.as_ptr(),
-            libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            sys::O_PATH | sys::O_DIRECTORY | sys::O_NOFOLLOW | sys::O_CLOEXEC,
         )
     };
     if fd < 0 {
@@ -154,7 +185,7 @@ fn open_parent(root: &Path, relative_path: &Path) -> Result<(OwnedFd, CString), 
 }
 
 fn fsync_fd(fd: RawFd) -> io::Result<()> {
-    let rc = unsafe { libc::fsync(fd) };
+    let rc = unsafe { sys::fsync(fd) };
     if rc < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -164,7 +195,7 @@ fn fsync_fd(fd: RawFd) -> io::Result<()> {
 
 fn unlinkat_best_effort(parent: RawFd, name: &CStr) {
     unsafe {
-        libc::unlinkat(parent, name.as_ptr(), 0);
+        sys::unlinkat(parent, name.as_ptr(), 0);
     }
 }
 
@@ -185,15 +216,15 @@ pub fn atomic_write(root: &Path, relative_path: &Path, bytes: &[u8]) -> Result<(
         ))
         .expect("generated temp name contains no NUL");
         let fd = unsafe {
-            libc::openat(
+            sys::openat(
                 parent_fd,
                 candidate.as_ptr(),
-                libc::O_WRONLY
-                    | libc::O_CREAT
-                    | libc::O_EXCL
-                    | libc::O_NOFOLLOW
-                    | libc::O_CLOEXEC,
-                0o600,
+                sys::O_WRONLY
+                    | sys::O_CREAT
+                    | sys::O_EXCL
+                    | sys::O_NOFOLLOW
+                    | sys::O_CLOEXEC,
+                0o600_u32,
             )
         };
         if fd >= 0 {
@@ -222,7 +253,7 @@ pub fn atomic_write(root: &Path, relative_path: &Path, bytes: &[u8]) -> Result<(
         drop(file);
 
         let rc = unsafe {
-            libc::renameat(
+            sys::renameat(
                 parent_fd,
                 temp_name.as_ptr(),
                 parent_fd,
@@ -245,7 +276,7 @@ pub fn atomic_write(root: &Path, relative_path: &Path, bytes: &[u8]) -> Result<(
 
 pub fn create_directory(root: &Path, relative_path: &Path) -> Result<(), MutationError> {
     let (parent, leaf) = open_parent(root, relative_path)?;
-    let rc = unsafe { libc::mkdirat(parent.as_raw_fd(), leaf.as_ptr(), 0o700) };
+    let rc = unsafe { sys::mkdirat(parent.as_raw_fd(), leaf.as_ptr(), 0o700_u32) };
     if rc < 0 {
         return Err(io::Error::last_os_error().into());
     }
