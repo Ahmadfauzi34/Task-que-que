@@ -29,12 +29,19 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
 }
 
+require_executable() {
+  case "$1" in
+    */*) [ -x "$1" ] || fail "executable not found: $1" ;;
+    *) command -v "$1" >/dev/null 2>&1 || fail "executable not found in PATH: $1" ;;
+  esac
+}
+
 require_command curl
 require_command grep
 require_command sed
 require_command mktemp
 require_command ln
-[ -x "$BUN_BIN" ] || fail "Bun runtime not executable: $BUN_BIN"
+require_executable "$BUN_BIN"
 
 mkdir -p "$DELEGATED_ROOT/src" "$OUTSIDE_ROOT"
 printf 'physical filesystem proof\n' > "$DELEGATED_ROOT/README.txt"
@@ -107,8 +114,6 @@ STATUS="$(curl -sS -o "$TMP_DIR/symlink.json" -w '%{http_code}' -X POST \
 [ "$STATUS" = "403" ] || fail "outside-root symlink was not rejected"
 
 MCP_META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"termux-filesystem-proof","version":"1.0.0"},"io.modelcontextprotocol/clientCapabilities":{}}'
-# Strip the shell-only escaping above into a raw JSON object fragment once.
-MCP_META="$(printf '%s' "$MCP_META" | sed 's/\\"/"/g')"
 
 MCP_LIST="$(curl -fsS -X POST "http://127.0.0.1:$PORT/mcp" \
   -H "Authorization: Bearer $SESSION_TOKEN" \
