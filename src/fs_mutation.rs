@@ -25,11 +25,26 @@ fn cstring(value: &str) -> Result<CString, MutationError> {
     CString::new(value).map_err(|_| MutationError::InvalidPath)
 }
 
-fn open_dir_at(parent: RawFd, name: &CStr) -> io::Result<OwnedFd> {
+fn open_path_dir_at(parent: RawFd, name: &CStr) -> io::Result<OwnedFd> {
     let fd = unsafe {
         libc::openat(
             parent,
             name.as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn open_readable_parent(parent: RawFd) -> io::Result<OwnedFd> {
+    let dot = CStr::from_bytes_with_nul(b".\0").expect("static dot path");
+    let fd = unsafe {
+        libc::openat(
+            parent,
+            dot.as_ptr(),
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     };
@@ -44,7 +59,7 @@ fn open_host_root() -> io::Result<OwnedFd> {
     let fd = unsafe {
         libc::open(
             slash.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     };
     if fd < 0 {
@@ -112,7 +127,7 @@ fn open_root(root: &Path) -> Result<OwnedFd, MutationError> {
     let components = strict_components(root, true)?;
     let mut current = open_host_root()?;
     for component in components {
-        current = open_dir_at(current.as_raw_fd(), &component)?;
+        current = open_path_dir_at(current.as_raw_fd(), &component)?;
     }
     Ok(current)
 }
@@ -130,9 +145,10 @@ fn open_parent(root: &Path, relative_path: &Path) -> Result<(OwnedFd, CString), 
     let leaf = components.pop().ok_or(MutationError::InvalidPath)?;
     let mut current = open_root(root)?;
     for component in components {
-        current = open_dir_at(current.as_raw_fd(), &component)?;
+        current = open_path_dir_at(current.as_raw_fd(), &component)?;
     }
-    Ok((current, leaf))
+    let writable_parent = open_readable_parent(current.as_raw_fd())?;
+    Ok((writable_parent, leaf))
 }
 
 fn fsync_fd(fd: RawFd) -> io::Result<()> {
