@@ -117,6 +117,12 @@ fn open_root(root: &Path) -> Result<OwnedFd, MutationError> {
     Ok(current)
 }
 
+pub fn probe_root(root: &Path) -> Result<(), MutationError> {
+    let root_fd = open_root(root)?;
+    fsync_fd(root_fd.as_raw_fd())?;
+    Ok(())
+}
+
 fn open_parent(root: &Path, relative_path: &Path) -> Result<(OwnedFd, CString), MutationError> {
     if relative_path.is_absolute() {
         return Err(MutationError::InvalidPath);
@@ -262,6 +268,15 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.base);
         }
+    }
+
+    #[test]
+    fn probes_only_non_root_directories_without_symlink_components() {
+        let fixture = Fixture::new();
+        probe_root(&fixture.root).unwrap();
+        assert!(matches!(probe_root(Path::new("/")), Err(MutationError::InvalidRoot)));
+        symlink(&fixture.root, fixture.base.join("root-link")).unwrap();
+        assert!(probe_root(&fixture.base.join("root-link")).is_err());
     }
 
     #[test]
