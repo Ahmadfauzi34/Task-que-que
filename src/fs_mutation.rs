@@ -111,6 +111,10 @@ fn open_path_dir_at(parent: RawFd, name: &CStr) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+fn verify_directory_fd(fd: RawFd) -> io::Result<OwnedFd> {
+    open_path_dir_at(fd, c".")
+}
+
 fn open_readable_parent(parent: RawFd) -> io::Result<OwnedFd> {
     let fd = unsafe {
         sys::openat(
@@ -147,7 +151,12 @@ fn open_root(root: &Path) -> Result<OwnedFd, MutationError> {
     for component in components {
         current = open_path_dir_at(current.as_raw_fd(), &component)?;
     }
-    Ok(current)
+
+    // O_PATH | O_NOFOLLOW can yield an fd that refers to the final symlink
+    // itself on Android. Re-resolving "." relative to that fd proves the
+    // terminal object is actually a directory without following a symlink.
+    verify_directory_fd(current.as_raw_fd())
+        .map_err(|_| MutationError::InvalidRoot)
 }
 
 pub fn probe_root(root: &Path) -> Result<(), MutationError> {
