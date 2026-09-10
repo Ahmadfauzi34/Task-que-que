@@ -1,6 +1,6 @@
 # Capability depth and authority contract
 
-This document defines the pre-MCP capability model for the Task-que-que reference machine.
+This document defines the capability model for the Task-que-que reference machine and its MCP projection.
 
 The model is intentionally not a conventional `user/admin` permission ladder. It separates two independent questions:
 
@@ -35,12 +35,18 @@ D5 is an **authorized delegation boundary**, not a sandbox escape primitive. An 
 
 ## Scope proof
 
-A capability is usable only when all three dimensions pass:
+A capability is authorized only when all three dimensions pass:
 
 ```text
 grant.depth     >= capability.minDepth
 grant.authority >= capability.minAuthority
 required scopes are covered by grant scopes
+```
+
+Runtime executability is a separate proof:
+
+```text
+authorized && provider_available => executable
 ```
 
 The capability registry is own-property checked. Prototype-looking names must never become capabilities by inheritance.
@@ -49,7 +55,7 @@ The capability registry is own-property checked. Prototype-looking names must ne
 
 The canonical runtime inventory is `gateway/src/capabilities.ts`.
 
-It currently describes only capabilities supported by the existing reference machine, including:
+It includes:
 
 - gateway health and readiness
 - public task submit/inspect surfaces
@@ -59,10 +65,25 @@ It currently describes only capabilities supported by the existing reference mac
 - registered `vector.dot`
 - registered `agent.invoke`
 - registered `workflow.run`
+- delegated read-only `filesystem.list`
+- delegated read-only `filesystem.stat`
+- delegated read-only `filesystem.read`
 
-`agent.invoke` is described as a D5 delegated-system capability because it crosses into a remote-agent provider. Runtime availability is a separate fact: if the remote-agent worker is disabled, registration does not imply that an executor is currently online.
+`agent.invoke` is a D5 delegated-system capability because it crosses into a remote-agent provider. Runtime availability is separate: if the remote-agent worker is disabled, registration and authorization do not imply that an executor is online.
 
-The inventory deliberately does **not** claim that filesystem, package installation, arbitrary process execution, Git mutation, or general outbound networking already exist. Those become new providers only after their own implementation and proof gates.
+The filesystem provider is the first host-system D5 provider. It is disabled unless the operator configures `GATEWAY_FILESYSTEM_ROOT`. The configured root is server-owned policy: callers receive only relative-path operations and cannot override the root.
+
+The filesystem capabilities are intentionally read-only:
+
+```text
+filesystem.list  -> D5 / A0 / filesystem.inspect
+filesystem.stat  -> D5 / A0 / filesystem.inspect
+filesystem.read  -> D5 / A0 / filesystem.read
+```
+
+The provider rejects absolute caller paths, parent traversal, backslashes, NULs, symlink targets outside the canonical root, and a configured root that resolves to `/`. Directory listings and text reads are bounded, and file reads accept UTF-8 text only.
+
+Filesystem write/delete, package installation, arbitrary process execution, Git mutation, and general outbound networking are still **not** capabilities. They require separate providers and proof gates.
 
 ## Compatibility state
 
@@ -72,31 +93,35 @@ The existing public gateway behavior is preserved by `LEGACY_COMPAT_GRANT`:
 D6 / A4 / scope=*
 ```
 
-That is a compatibility reference, not the intended final MCP session policy. Existing task/workflow routes continue to be governed by their current authentication, registry/admission, exact routing, lease fencing, cancellation and declared-result invariants.
+That is a compatibility reference, not the intended MCP session policy. Existing task/workflow routes remain governed by authentication, registry/admission, exact routing, lease fencing, cancellation and declared-result invariants.
 
-The next MCP/session layer should derive a `CapabilityGrant` from trusted server-side authentication/policy. A client must never be able to self-assert a deeper grant by sending a header or request field.
+Signed capability sessions derive `CapabilityGrant` from trusted server-side authority. A client cannot self-assert a deeper grant through request headers or tool arguments.
 
-## MCP projection target
+## MCP projection
 
-The MCP adapter should consume the capability registry rather than maintain a second hardcoded tool list:
+The MCP adapter consumes the canonical capability registry rather than maintaining a second execution-authority list:
 
 ```text
 reference machine providers
           ↓
 canonical capability registry
           ↓
-depth + authority + scopes
+signed depth + authority + scopes
+          +
+runtime provider availability
           ↓
-agent-facing projection
+agent-facing executable projection
           ↓
-MCP adapter
+MCP tools/list
 ```
 
-A low-depth agent may still discover that a deeper capability exists, but the projection marks it inaccessible and explains whether the blocker is depth, authority, or scope. This lets the agent reason about what the reference machine can do without silently converting discovery into execution authority.
+A low-depth agent can still inspect registered deeper capabilities through `system.capabilities`, while `tools/list` advertises only capabilities that are both authorized and available.
 
-## Proof obligations before privileged providers
+For filesystem tools, availability requires the server-configured delegated root to resolve to a readable directory. The absolute root is never part of the MCP tool arguments or public result projection.
 
-Before D5/D6 gains filesystem, package, process, network, Git or machine-control providers, each provider should prove at minimum:
+## Proof obligations for privileged providers
+
+Every D5/D6 provider should prove at minimum:
 
 ```text
 exact capability identity
@@ -105,17 +130,15 @@ server-side grant decision
         ↓
 bounded/scoped input
         ↓
-admission
+runtime provider availability
         ↓
-exact worker/provider routing
+exact provider routing
         ↓
-lease/session authority
+revocable authority where applicable
         ↓
-cancellable execution where applicable
-        ↓
-fenced completion
-        ↓
-declared output
+bounded declared output
 ```
+
+Mutating or asynchronous providers additionally need the relevant admission, cancellation, fencing and durable-result proofs.
 
 This keeps Task-que-que useful as a capability portability layer without turning MCP into unrestricted shell passthrough.

@@ -25,6 +25,7 @@ const MCP_LIST_TTL_MS = 30_000;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9._:-]{1,128}$/;
+const MAX_FILESYSTEM_PATH_CHARS = 4_096;
 
 export type GatewayInvoker = (request: Request) => Promise<Response>;
 
@@ -357,6 +358,23 @@ function positiveIdSchema(name: string) {
   };
 }
 
+function filesystemPathSchema() {
+  return {
+    type: "object",
+    properties: {
+      path: {
+        type: "string",
+        minLength: 1,
+        maxLength: MAX_FILESYSTEM_PATH_CHARS,
+        description:
+          "Relative POSIX path inside the server-configured filesystem root. Absolute paths, parent traversal, and backslashes are rejected by the gateway.",
+      },
+    },
+    required: ["path"],
+    additionalProperties: false,
+  };
+}
+
 function taskEnvelopeSchema(
   includeType: boolean,
   taskNames: readonly string[] = [],
@@ -401,6 +419,10 @@ function toolSchema(
   auth: AuthorizationContext,
   availability: CapabilityAvailabilitySnapshot,
 ): Record<string, unknown> | null {
+  if (descriptor.provider === "bun-filesystem") {
+    return filesystemPathSchema();
+  }
+
   switch (descriptor.name) {
     case "system.health":
     case "system.readiness":
@@ -486,6 +508,13 @@ function validIdempotencyKey(value: unknown): value is string {
   return typeof value === "string" && IDEMPOTENCY_KEY.test(value);
 }
 
+function validFilesystemPath(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= MAX_FILESYSTEM_PATH_CHARS
+    && !value.includes("\0");
+}
+
 function taskArguments(
   args: Record<string, unknown>,
   includeType: boolean,
@@ -560,6 +589,18 @@ function invocationForTool(
   availability: CapabilityAvailabilitySnapshot,
   args: Record<string, unknown>,
 ): Request | null {
+  if (descriptor.provider === "bun-filesystem") {
+    if (
+      descriptor.method !== "POST"
+      || !descriptor.route
+      || !exactKeys(args, ["path"])
+      || !validFilesystemPath(args.path)
+    ) {
+      return null;
+    }
+    return gatewayRequest(source, descriptor.route, "POST", { path: args.path });
+  }
+
   switch (descriptor.name) {
     case "system.health":
       return exactKeys(args, [])
@@ -793,7 +834,7 @@ export async function handleMcpRequest(
           tools: { listChanged: false },
         },
         instructions:
-          "Task-que-que advertises only capabilities that are both authorized by the bearer grant and backed by a live provider. Use system.capabilities to inspect registered capabilities, authorization blockers, and runtime availability.",
+          "Task-que-que advertises only capabilities that are both authorized by the bearer grant and backed by a live provider. Delegated filesystem tools are confined to a server-configured root. Use system.capabilities to inspect registered capabilities, authorization blockers, and runtime availability.",
         ttlMs: MCP_LIST_TTL_MS,
         cacheScope: "private",
       },

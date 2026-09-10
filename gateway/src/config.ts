@@ -1,8 +1,11 @@
+import { posix } from "node:path";
+
 export interface GatewayConfig {
   hostname: string;
   port: number;
   queueDaemonOrigin: string;
   workerBrokerOrigin?: string;
+  filesystemRoot?: string | null;
   apiToken: string | null;
   allowUnauthenticated: boolean;
   upstreamTimeoutMs: number;
@@ -62,6 +65,20 @@ function parseLoopbackOrigin(raw: string, name: string): string {
   return url.origin;
 }
 
+function parseFilesystemRoot(raw: string | undefined): string | null {
+  const value = raw?.trim();
+  if (!value) return null;
+  if (value.includes("\0") || value.length > 4_096 || !posix.isAbsolute(value)) {
+    throw new Error("GATEWAY_FILESYSTEM_ROOT must be a bounded absolute POSIX path");
+  }
+
+  const normalized = posix.normalize(value);
+  if (normalized === "/") {
+    throw new Error("GATEWAY_FILESYSTEM_ROOT must not delegate the filesystem root /");
+  }
+  return normalized;
+}
+
 export function loadGatewayConfig(
   env: Record<string, string | undefined> = process.env,
 ): GatewayConfig {
@@ -118,6 +135,7 @@ export function loadGatewayConfig(
       env.WORKER_BROKER_URL?.trim() || DEFAULT_WORKER_BROKER,
       "WORKER_BROKER_URL",
     ),
+    filesystemRoot: parseFilesystemRoot(env.GATEWAY_FILESYSTEM_ROOT),
     apiToken,
     allowUnauthenticated,
     upstreamTimeoutMs,

@@ -32,6 +32,9 @@ function requiredSurface(path: string, method: string): string | null {
   if (/^\/v1\/workflows\/[^/]+$/.test(path) && method === "GET") return "workflow.inspect";
   if (/^\/v1\/workflows\/[^/]+\/result$/.test(path) && method === "GET") return "workflow.result";
   if (/^\/v1\/workflows\/[^/]+\/cancel$/.test(path) && method === "POST") return "workflow.cancel";
+  if (path === "/v1/filesystem/list" && method === "POST") return "filesystem.list";
+  if (path === "/v1/filesystem/stat" && method === "POST") return "filesystem.stat";
+  if (path === "/v1/filesystem/read" && method === "POST") return "filesystem.read";
   return null;
 }
 
