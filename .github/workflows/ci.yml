@@ -28,6 +28,7 @@ jobs:
           sh -n tests/worker-protocol-smoke.sh
           sh -n tests/provider-availability-smoke.sh
           sh -n tests/termux-filesystem-provider-smoke.sh
+          sh -n tests/filesystem-mutation-substrate-smoke.sh
           sh -n tests/termux-worker-protocol-smoke.sh
           bash -n tests/reference-document-worker-smoke.sh
           sh -n tests/termux-reference-document-worker-smoke.sh
@@ -51,6 +52,11 @@ jobs:
 
       - name: Run unit & integration tests
         run: cargo test --all-targets --verbose
+
+      - name: Prove fd-relative filesystem mutation substrate
+        run: |
+          cargo build --locked --bin robust-sinkhorn-fs-mutator
+          sh tests/filesystem-mutation-substrate-smoke.sh
 
   gateway:
     name: Bun Gateway
