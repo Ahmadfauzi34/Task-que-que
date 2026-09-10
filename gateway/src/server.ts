@@ -1,6 +1,7 @@
 import { TokenBucketAdmissionController } from "./admission";
 import { MAX_PUBLIC_REQUEST_BYTES } from "./app";
 import { loadGatewayConfig } from "./config";
+import { handleMcpRequest, MCP_ENDPOINT, MCP_PROTOCOL_VERSION } from "./mcp";
 import { TASK_REGISTRY } from "./registry";
 import { routeGatewayRequest } from "./router";
 
@@ -21,7 +22,12 @@ const server = Bun.serve({
   maxRequestBodySize: MAX_PUBLIC_REQUEST_BYTES,
   idleTimeout: 10,
   async fetch(request) {
-    return routeGatewayRequest(request, dependencies);
+    const mcpResponse = await handleMcpRequest(
+      request,
+      dependencies,
+      (inner) => routeGatewayRequest(inner, dependencies),
+    );
+    return mcpResponse ?? routeGatewayRequest(request, dependencies);
   },
   error(error) {
     console.error("gateway request failure", error);
@@ -41,6 +47,7 @@ console.log(`queue  : ${config.queueDaemonOrigin}`);
 console.log(`auth   : ${config.allowUnauthenticated ? "explicitly disabled" : "bearer token required"}`);
 console.log(`tasks  : ${Object.keys(TASK_REGISTRY).join(", ") || "none"}`);
 console.log(`enqueue: ${config.enqueueRatePerSecond}/s, burst ${config.enqueueBurst}`);
+console.log(`mcp    : ${MCP_ENDPOINT} (${MCP_PROTOCOL_VERSION})`);
 console.log("capability api: /v1/capabilities");
 console.log("capability sessions: /v1/capability-sessions");
 console.log("workflow api: /v1/workflows");
