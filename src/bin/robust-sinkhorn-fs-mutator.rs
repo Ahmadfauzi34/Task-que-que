@@ -49,7 +49,7 @@ fn main() {
             let mut bytes = Vec::new();
             let mut limited = io::stdin().take((1024 * 1024 + 1) as u64);
             if limited.read_to_end(&mut bytes).is_err() {
-                eprintln!("{\"ok\":false,\"error\":\"stdin_read_error\"}");
+                eprintln!("{{\"ok\":false,\"error\":\"stdin_read_error\"}}");
                 std::process::exit(1);
             }
             atomic_write(Path::new(&root), Path::new(&path), &bytes)
