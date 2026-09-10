@@ -85,7 +85,7 @@ function containedBy(root: string, target: string): boolean {
     || (!delta.startsWith(`..${sep}`) && delta !== ".." && !isAbsolute(delta));
 }
 
-async function canonicalRoot(root: string | null): Promise<string> {
+async function canonicalRoot(root: string | null | undefined): Promise<string> {
   if (!root) {
     throw new FilesystemBoundaryError(
       503,
@@ -191,7 +191,9 @@ function statType(metadata: {
   return "other";
 }
 
-export async function filesystemRootAvailable(root: string | null): Promise<boolean> {
+export async function filesystemRootAvailable(
+  root: string | null | undefined,
+): Promise<boolean> {
   try {
     await canonicalRoot(root);
     return true;
