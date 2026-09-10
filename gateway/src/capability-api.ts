@@ -1,5 +1,9 @@
 import { GATEWAY_VERSION, type GatewayDependencies } from "./app";
 import {
+  isCapabilityAvailable,
+  loadCapabilityAvailability,
+} from "./capability-availability";
+import {
   resolveAuthorizationContext,
   type AuthorizationContext,
 } from "./capability-auth";
@@ -64,6 +68,18 @@ export async function handleCapabilityRequest(
     );
   }
 
+  const availability = await loadCapabilityAvailability(dependencies);
+  const capabilities = projectCapabilityCatalog(CAPABILITY_REGISTRY, auth.grant).map((projection) => {
+    const descriptor = getCapability(CAPABILITY_REGISTRY, projection.name);
+    const available = descriptor ? isCapabilityAvailable(descriptor, availability) : false;
+    return {
+      ...projection,
+      authorized: projection.accessible,
+      available,
+      executable: projection.accessible && available,
+    };
+  });
+
   return jsonResponse({
     schema_version: 1,
     model: {
@@ -80,6 +96,9 @@ export async function handleCapabilityRequest(
       authority: auth.grant.authority,
       scopes: [...auth.grant.scopes],
     },
-    capabilities: projectCapabilityCatalog(CAPABILITY_REGISTRY, auth.grant),
+    runtime: {
+      worker_registry_reachable: availability.providerReachable,
+    },
+    capabilities,
   });
 }
