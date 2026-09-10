@@ -1,6 +1,7 @@
 import type { FetchLike, GatewayDependencies } from "./app";
 import type { CapabilityDescriptor } from "./capabilities";
 import { DEFAULT_WORKER_BROKER } from "./config";
+import { filesystemRootAvailable } from "./filesystem-api";
 
 interface ProviderAwareDependencies extends GatewayDependencies {
   providerFetchImpl?: FetchLike;
@@ -8,12 +9,14 @@ interface ProviderAwareDependencies extends GatewayDependencies {
 
 export interface CapabilityAvailabilitySnapshot {
   providerReachable: boolean;
+  filesystemReachable: boolean;
   activeTaskNames: ReadonlySet<string>;
 }
 
-function unavailableSnapshot(): CapabilityAvailabilitySnapshot {
+function unavailableSnapshot(filesystemReachable: boolean): CapabilityAvailabilitySnapshot {
   return Object.freeze({
     providerReachable: false,
+    filesystemReachable,
     activeTaskNames: new Set<string>(),
   });
 }
@@ -32,8 +35,11 @@ function safeTaskName(value: unknown): value is string {
 export async function loadCapabilityAvailability(
   dependencies: GatewayDependencies,
 ): Promise<CapabilityAvailabilitySnapshot> {
+  const filesystemReachable = await filesystemRootAvailable(
+    dependencies.config.filesystemRoot,
+  );
   const providerFetchImpl = (dependencies as ProviderAwareDependencies).providerFetchImpl;
-  if (!providerFetchImpl) return unavailableSnapshot();
+  if (!providerFetchImpl) return unavailableSnapshot(filesystemReachable);
 
   const origin = dependencies.config.workerBrokerOrigin ?? DEFAULT_WORKER_BROKER;
   const controller = new AbortController();
@@ -45,25 +51,26 @@ export async function loadCapabilityAvailability(
       headers: { accept: "application/json" },
       signal: controller.signal,
     });
-    if (response.status !== 200) return unavailableSnapshot();
+    if (response.status !== 200) return unavailableSnapshot(filesystemReachable);
 
     const parsed: unknown = await response.json();
     if (!isRecord(parsed) || parsed.schema_version !== 1 || !Array.isArray(parsed.active_task_names)) {
-      return unavailableSnapshot();
+      return unavailableSnapshot(filesystemReachable);
     }
 
     const activeTaskNames = new Set<string>();
     for (const value of parsed.active_task_names) {
-      if (!safeTaskName(value)) return unavailableSnapshot();
+      if (!safeTaskName(value)) return unavailableSnapshot(filesystemReachable);
       activeTaskNames.add(value);
     }
 
     return Object.freeze({
       providerReachable: true,
+      filesystemReachable,
       activeTaskNames,
     });
   } catch {
-    return unavailableSnapshot();
+    return unavailableSnapshot(filesystemReachable);
   } finally {
     clearTimeout(timer);
   }
@@ -73,6 +80,10 @@ export function isCapabilityAvailable(
   descriptor: CapabilityDescriptor,
   snapshot: CapabilityAvailabilitySnapshot,
 ): boolean {
+  if (descriptor.provider === "bun-filesystem") {
+    return snapshot.filesystemReachable;
+  }
+
   if (descriptor.kind === "task") {
     return snapshot.providerReachable && snapshot.activeTaskNames.has(descriptor.name);
   }
