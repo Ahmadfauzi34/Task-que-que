@@ -1,5 +1,4 @@
-import type { GatewayConfig } from "./config";
-import type { GatewayDependencies } from "./app";
+import { GATEWAY_VERSION, type GatewayDependencies } from "./app";
 import {
   CAPABILITY_AUTHORITY,
   CAPABILITY_DEPTH,
@@ -10,6 +9,7 @@ import {
   projectCapabilityCatalog,
   type CapabilityGrant,
 } from "./capabilities";
+import type { GatewayConfig } from "./config";
 
 const encoder = new TextEncoder();
 
@@ -19,6 +19,7 @@ function jsonResponse(value: unknown, status = 200): Response {
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
+      "x-gateway-version": GATEWAY_VERSION,
     },
   });
 }
