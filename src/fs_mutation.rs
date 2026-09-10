@@ -118,8 +118,7 @@ fn open_root(root: &Path) -> Result<OwnedFd, MutationError> {
 }
 
 pub fn probe_root(root: &Path) -> Result<(), MutationError> {
-    let root_fd = open_root(root)?;
-    fsync_fd(root_fd.as_raw_fd())?;
+    let _root_fd = open_root(root)?;
     Ok(())
 }
 
