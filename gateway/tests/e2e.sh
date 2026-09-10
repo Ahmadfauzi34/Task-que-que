@@ -35,6 +35,24 @@ wait_for_url() {
   return 1
 }
 
+mcp_post() {
+  local method="$1"
+  local body="$2"
+  local name="${3:-}"
+  local args=(
+    -fsS -X POST http://127.0.0.1:3000/mcp
+    -H 'Authorization: Bearer ci-gateway-secret'
+    -H 'Content-Type: application/json'
+    -H 'Accept: application/json, text/event-stream'
+    -H 'MCP-Protocol-Version: 2026-07-28'
+    -H "Mcp-Method: $method"
+  )
+  if [[ -n "$name" ]]; then
+    args+=( -H "Mcp-Name: $name" )
+  fi
+  curl "${args[@]}" --data-binary "$body"
+}
+
 cd "$ROOT_DIR"
 
 ./target/debug/robust-sinkhorn-queue serve \
@@ -56,6 +74,24 @@ wait_for_url "http://127.0.0.1:3000/readyz" "$TMP_DIR/gateway.log"
 
 health="$(curl -fsS http://127.0.0.1:3000/healthz)"
 printf '%s' "$health" | grep -F '"status":"ok"' >/dev/null
+
+MCP_META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"ci-e2e","version":"1.0.0"},"io.modelcontextprotocol/clientCapabilities":{}}'
+
+mcp_discover="$(mcp_post server/discover "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{$MCP_META}}")"
+printf '%s' "$mcp_discover" | grep -F '"supportedVersions":["2026-07-28"]' >/dev/null
+printf '%s' "$mcp_discover" | grep -F '"tools":{"listChanged":false}' >/dev/null
+if printf '%s' "$mcp_discover" | grep -Fi 'mcp-session-id' >/dev/null; then
+  echo "modern MCP discovery unexpectedly exposed a protocol session id" >&2
+  exit 1
+fi
+
+mcp_tools="$(mcp_post tools/list "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{$MCP_META}}")"
+printf '%s' "$mcp_tools" | grep -F '"name":"system.capabilities"' >/dev/null
+printf '%s' "$mcp_tools" | grep -F '"name":"document.process"' >/dev/null
+
+mcp_ready="$(mcp_post tools/call "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"system.readiness\",\"arguments\":{},$MCP_META}}" system.readiness)"
+printf '%s' "$mcp_ready" | grep -F '"isError":false' >/dev/null
+printf '%s' "$mcp_ready" | grep -F '\"queue\":\"ready\"' >/dev/null
 
 unauthorized_status="$(
   curl -sS -o "$TMP_DIR/unauthorized.json" -w '%{http_code}' \
@@ -155,6 +191,7 @@ if curl -fsS "http://127.0.0.1:3000/v1/tasks/2" \
   exit 1
 fi
 
+echo "Modern MCP stateless Bun -> Rust readiness integration: OK"
 echo "Bun -> Rust idempotent localhost integration: OK (task_id=$TASK_ID)"
 echo "Rust bounded queue metrics integration: OK"
 echo "Durable active-task admission integration: OK (capacity=1)"
