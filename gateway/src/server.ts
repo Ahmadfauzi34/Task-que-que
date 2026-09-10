@@ -50,6 +50,7 @@ console.log(`auth   : ${config.allowUnauthenticated ? "explicitly disabled" : "b
 console.log(`tasks  : ${Object.keys(TASK_REGISTRY).join(", ") || "none"}`);
 console.log(`enqueue: ${config.enqueueRatePerSecond}/s, burst ${config.enqueueBurst}`);
 console.log(`mcp    : ${MCP_ENDPOINT} (${MCP_PROTOCOL_VERSION})`);
+console.log(`filesystem: ${config.filesystemRoot ? "scoped read-only provider configured" : "disabled"}`);
 console.log("capability api: /v1/capabilities");
 console.log("capability sessions: /v1/capability-sessions");
 console.log("workflow api: /v1/workflows");
