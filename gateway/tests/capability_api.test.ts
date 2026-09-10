@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 
 import type { AdmissionController } from "../src/admission";
 import type { GatewayDependencies } from "../src/app";
+import { issueCapabilitySession } from "../src/capability-auth";
 import { handleCapabilityRequest } from "../src/capability-api";
 import {
   CAPABILITY_AUTHORITY,
   CAPABILITY_DEPTH,
-  type CapabilityGrant,
 } from "../src/capabilities";
 import type { GatewayConfig } from "../src/config";
 import { TASK_REGISTRY } from "../src/registry";
@@ -33,8 +33,10 @@ const dependencies: GatewayDependencies = {
   admissionController,
 };
 
-function request(init: RequestInit = {}): Request {
-  return new Request("http://127.0.0.1:3000/v1/capabilities", init);
+function request(token?: string, extraHeaders: HeadersInit = {}): Request {
+  const headers = new Headers(extraHeaders);
+  if (token) headers.set("authorization", `Bearer ${token}`);
+  return new Request("http://127.0.0.1:3000/v1/capabilities", { headers });
 }
 
 describe("capability discovery api", () => {
@@ -43,15 +45,13 @@ describe("capability discovery api", () => {
     expect(response?.status).toBe(401);
   });
 
-  test("returns the compatibility projection for the existing server token", async () => {
-    const response = await handleCapabilityRequest(
-      request({ headers: { authorization: "Bearer test-secret" } }),
-      dependencies,
-    );
+  test("returns the compatibility projection for the existing root token", async () => {
+    const response = await handleCapabilityRequest(request("test-secret"), dependencies);
 
     expect(response?.status).toBe(200);
     const body = (await response!.json()) as Record<string, any>;
     expect(body.schema_version).toBe(1);
+    expect(body.subject).toEqual({ kind: "root", session_id: null, expires_at: null });
     expect(body.grant).toEqual({ depth: 6, authority: 4, scopes: ["*"] });
 
     const discovery = body.capabilities.find(
@@ -64,21 +64,24 @@ describe("capability discovery api", () => {
     });
   });
 
-  test("projects deeper capabilities as locked for a discovery-only grant", async () => {
-    const grant: CapabilityGrant = {
-      depth: CAPABILITY_DEPTH.DISCOVER,
-      authority: CAPABILITY_AUTHORITY.OBSERVE,
-      scopes: ["capability.read"],
-    };
-
-    const response = await handleCapabilityRequest(
-      request({ headers: { authorization: "Bearer test-secret" } }),
-      dependencies,
-      grant,
+  test("projects deeper capabilities as locked from a signed discovery-only session", async () => {
+    const issued = await issueCapabilitySession(
+      "test-secret",
+      {
+        depth: CAPABILITY_DEPTH.DISCOVER,
+        authority: CAPABILITY_AUTHORITY.OBSERVE,
+        scopes: ["capability.read"],
+      },
+      300,
     );
+
+    const response = await handleCapabilityRequest(request(issued.token), dependencies);
 
     expect(response?.status).toBe(200);
     const body = (await response!.json()) as Record<string, any>;
+    expect(body.subject.kind).toBe("session");
+    expect(body.subject.session_id).toBe(issued.claims.sid);
+    expect(body.grant).toEqual({ depth: 0, authority: 0, scopes: ["capability.read"] });
     const remoteAgent = body.capabilities.find(
       (entry: Record<string, unknown>) => entry.name === "agent.invoke",
     );
@@ -89,23 +92,23 @@ describe("capability discovery api", () => {
   });
 
   test("does not accept client headers as a capability grant", async () => {
-    const grant: CapabilityGrant = {
-      depth: CAPABILITY_DEPTH.DISCOVER,
-      authority: CAPABILITY_AUTHORITY.OBSERVE,
-      scopes: [],
-    };
+    const issued = await issueCapabilitySession(
+      "test-secret",
+      {
+        depth: CAPABILITY_DEPTH.DISCOVER,
+        authority: CAPABILITY_AUTHORITY.OBSERVE,
+        scopes: [],
+      },
+      300,
+    );
 
     const response = await handleCapabilityRequest(
-      request({
-        headers: {
-          authorization: "Bearer test-secret",
-          "x-capability-depth": "6",
-          "x-capability-authority": "4",
-          "x-capability-scopes": "*",
-        },
+      request(issued.token, {
+        "x-capability-depth": "6",
+        "x-capability-authority": "4",
+        "x-capability-scopes": "*",
       }),
       dependencies,
-      grant,
     );
 
     expect(response?.status).toBe(403);
