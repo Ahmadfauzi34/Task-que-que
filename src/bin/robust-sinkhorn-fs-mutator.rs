@@ -24,6 +24,7 @@ fn error_code(error: &MutationError) -> &'static str {
         MutationError::InvalidRoot => "invalid_root",
         MutationError::InvalidPath => "invalid_path",
         MutationError::PayloadTooLarge => "payload_too_large",
+        MutationError::CommittedDurabilityUnknown(_) => "committed_durability_unknown",
         MutationError::Io(_) => "mutation_io_error",
     }
 }
