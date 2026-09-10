@@ -65,7 +65,7 @@ fn invalid_path(absolute: bool) -> MutationError {
 fn strict_components(path: &Path, absolute: bool) -> Result<Vec<CString>, MutationError> {
     let raw = path.to_str().ok_or_else(|| invalid_path(absolute))?;
     if raw.is_empty()
-        || raw.as_bytes().len() > MAX_PATH_BYTES
+        || raw.len() > MAX_PATH_BYTES
         || raw.as_bytes().contains(&0)
         || raw.contains('\\')
     {
@@ -112,11 +112,10 @@ fn open_path_dir_at(parent: RawFd, name: &CStr) -> io::Result<OwnedFd> {
 }
 
 fn open_readable_parent(parent: RawFd) -> io::Result<OwnedFd> {
-    let dot = CStr::from_bytes_with_nul(b".\0").expect("static dot path");
     let fd = unsafe {
         sys::openat(
             parent,
-            dot.as_ptr(),
+            c".".as_ptr(),
             sys::O_RDONLY | sys::O_DIRECTORY | sys::O_NOFOLLOW | sys::O_CLOEXEC,
         )
     };
@@ -127,10 +126,9 @@ fn open_readable_parent(parent: RawFd) -> io::Result<OwnedFd> {
 }
 
 fn open_host_root() -> io::Result<OwnedFd> {
-    let slash = CStr::from_bytes_with_nul(b"/\0").expect("static root path");
     let fd = unsafe {
         sys::open(
-            slash.as_ptr(),
+            c"/".as_ptr(),
             sys::O_PATH | sys::O_DIRECTORY | sys::O_NOFOLLOW | sys::O_CLOEXEC,
         )
     };
