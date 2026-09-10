@@ -4,12 +4,17 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 RUST_PID=""
+BROKER_PID=""
 BUN_PID=""
 
 cleanup() {
   if [[ -n "$BUN_PID" ]]; then
     kill "$BUN_PID" >/dev/null 2>&1 || true
     wait "$BUN_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "$BROKER_PID" ]]; then
+    kill -INT "$BROKER_PID" >/dev/null 2>&1 || true
+    wait "$BROKER_PID" >/dev/null 2>&1 || true
   fi
   if [[ -n "$RUST_PID" ]]; then
     kill "$RUST_PID" >/dev/null 2>&1 || true
@@ -59,8 +64,20 @@ cd "$ROOT_DIR"
   --db "$TMP_DIR/queue.db" \
   >"$TMP_DIR/rust.log" 2>&1 &
 RUST_PID=$!
-
 wait_for_url "http://127.0.0.1:7331/readyz" "$TMP_DIR/rust.log"
+
+./target/debug/robust-sinkhorn-worker serve \
+  --db "$TMP_DIR/queue.db" \
+  >"$TMP_DIR/broker.log" 2>&1 &
+BROKER_PID=$!
+wait_for_url "http://127.0.0.1:7332/readyz" "$TMP_DIR/broker.log"
+
+curl -fsS -X POST http://127.0.0.1:7332/v1/register \
+  -H 'X-Worker-Id: mcp-provider-proof' \
+  -H 'X-Worker-Type: cpu' \
+  -H 'X-Worker-Capacity: 1' \
+  -H 'X-Worker-Tasks: document.process' \
+  >"$TMP_DIR/provider-registration.json"
 
 cd "$ROOT_DIR/gateway"
 GATEWAY_API_TOKEN="ci-gateway-secret" \
@@ -88,10 +105,20 @@ fi
 mcp_tools="$(mcp_post tools/list "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{$MCP_META}}")"
 printf '%s' "$mcp_tools" | grep -F '"name":"system.capabilities"' >/dev/null
 printf '%s' "$mcp_tools" | grep -F '"name":"document.process"' >/dev/null
+if printf '%s' "$mcp_tools" | grep -F '"name":"agent.invoke"' >/dev/null; then
+  echo "MCP advertised agent.invoke without a live remote-agent provider" >&2
+  exit 1
+fi
 
 mcp_ready="$(mcp_post tools/call "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"system.readiness\",\"arguments\":{},$MCP_META}}" system.readiness)"
 printf '%s' "$mcp_ready" | grep -F '"isError":false' >/dev/null
 printf '%s' "$mcp_ready" | grep -F '\"queue\":\"ready\"' >/dev/null
+
+# The MCP availability proof is complete. Stop the dummy provider broker so it
+# cannot claim the durable task used by the queue/admission assertions below.
+kill -INT "$BROKER_PID"
+wait "$BROKER_PID"
+BROKER_PID=""
 
 unauthorized_status="$(
   curl -sS -o "$TMP_DIR/unauthorized.json" -w '%{http_code}' \
@@ -126,7 +153,6 @@ printf '%s' "$created" | grep -F '"replayed":false' >/dev/null
 TASK_ID="$(printf '%s' "$created" | sed -n 's/.*"task_id":\([0-9][0-9]*\).*/\1/p')"
 test -n "$TASK_ID"
 
-# The queue is now at capacity=1. Replay must still precede capacity checking.
 replayed="$(
   curl -fsS -X POST http://127.0.0.1:3000/v1/tasks \
     -H 'Authorization: Bearer ci-gateway-secret' \
@@ -147,7 +173,6 @@ conflict_status="$(
 )"
 test "$conflict_status" = "409"
 
-# A genuinely new idempotency key must be rejected while the active watermark is full.
 capacity_status="$(
   curl -sS -o "$TMP_DIR/capacity.json" -w '%{http_code}' \
     -X POST http://127.0.0.1:3000/v1/tasks \
@@ -191,7 +216,8 @@ if curl -fsS "http://127.0.0.1:3000/v1/tasks/2" \
   exit 1
 fi
 
-echo "Modern MCP stateless Bun -> Rust readiness integration: OK"
+echo "Modern MCP stateless Bun -> live provider -> Rust readiness integration: OK"
+echo "MCP withheld unavailable remote-agent capability: OK"
 echo "Bun -> Rust idempotent localhost integration: OK (task_id=$TASK_ID)"
 echo "Rust bounded queue metrics integration: OK"
 echo "Durable active-task admission integration: OK (capacity=1)"
