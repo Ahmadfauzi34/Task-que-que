@@ -1,8 +1,9 @@
 use rand::random;
 use std::ffi::{CStr, CString};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use thiserror::Error;
 
@@ -138,23 +139,47 @@ fn open_host_root() -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+fn directory_identity(path: &Path) -> Result<(u64, u64), MutationError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| MutationError::InvalidRoot)?;
+    if !metadata.is_dir() {
+        return Err(MutationError::InvalidRoot);
+    }
+    Ok((metadata.dev(), metadata.ino()))
+}
+
 fn open_root(root: &Path) -> Result<OwnedFd, MutationError> {
     if !root.is_absolute() || root == Path::new("/") {
         return Err(MutationError::InvalidRoot);
     }
+
+    // Snapshot the configured terminal object without following a final
+    // symlink, then require fd-relative traversal to land on that exact
+    // directory inode. This is intentionally independent of Android's
+    // O_PATH/O_NOFOLLOW handling for a terminal symlink.
+    let expected_identity = directory_identity(root)?;
+
     let components = strict_components(root, true)?;
     let mut current = open_host_root()?;
     for component in components {
         current = open_path_dir_at(current.as_raw_fd(), &component)?;
     }
 
-    // O_PATH | O_NOFOLLOW can yield an fd that refers to the final symlink
-    // itself. File::metadata() uses fstat(2) on that exact fd, so this check
-    // verifies the terminal object type without resolving or following it.
     let file = File::from(current);
-    if !file.metadata()?.is_dir() {
+    let opened_metadata = file.metadata().map_err(|_| MutationError::InvalidRoot)?;
+    if !opened_metadata.is_dir()
+        || (opened_metadata.dev(), opened_metadata.ino()) != expected_identity
+    {
         return Err(MutationError::InvalidRoot);
     }
+
+    // Re-read the operator-configured name after opening. This rejects an
+    // ordinary namespace change between snapshot and open. A hostile same-UID
+    // process able to race and restore namespace state remains outside the
+    // documented threat boundary of this substrate.
+    if directory_identity(root)? != expected_identity {
+        return Err(MutationError::InvalidRoot);
+    }
+
     Ok(file.into())
 }
 
@@ -315,7 +340,10 @@ mod tests {
     fn probes_only_non_root_directories_without_symlink_components() {
         let fixture = Fixture::new();
         probe_root(&fixture.root).unwrap();
-        assert!(matches!(probe_root(Path::new("/")), Err(MutationError::InvalidRoot)));
+        assert!(matches!(
+            probe_root(Path::new("/")),
+            Err(MutationError::InvalidRoot)
+        ));
         symlink(&fixture.root, fixture.base.join("root-link")).unwrap();
         assert!(probe_root(&fixture.base.join("root-link")).is_err());
     }
@@ -323,7 +351,13 @@ mod tests {
     #[test]
     fn rejects_ambiguous_or_normalized_away_path_segments() {
         let fixture = Fixture::new();
-        for path in ["./file", "nested//file", "nested/./file", "nested/../file", "nested/"] {
+        for path in [
+            "./file",
+            "nested//file",
+            "nested/./file",
+            "nested/../file",
+            "nested/",
+        ] {
             assert!(matches!(
                 atomic_write(&fixture.root, Path::new(path), b"no\n"),
                 Err(MutationError::InvalidPath)
@@ -335,9 +369,15 @@ mod tests {
     fn writes_atomically_inside_opened_parent() {
         let fixture = Fixture::new();
         atomic_write(&fixture.root, Path::new("nested/file.txt"), b"first\n").unwrap();
-        assert_eq!(fs::read(fixture.root.join("nested/file.txt")).unwrap(), b"first\n");
+        assert_eq!(
+            fs::read(fixture.root.join("nested/file.txt")).unwrap(),
+            b"first\n"
+        );
         atomic_write(&fixture.root, Path::new("nested/file.txt"), b"second\n").unwrap();
-        assert_eq!(fs::read(fixture.root.join("nested/file.txt")).unwrap(), b"second\n");
+        assert_eq!(
+            fs::read(fixture.root.join("nested/file.txt")).unwrap(),
+            b"second\n"
+        );
     }
 
     #[test]
@@ -345,17 +385,29 @@ mod tests {
         let fixture = Fixture::new();
         let outside_file = fixture.outside.join("secret.txt");
         symlink(&outside_file, fixture.root.join("nested/link.txt")).unwrap();
-        atomic_write(&fixture.root, Path::new("nested/link.txt"), b"inside\n").unwrap();
+        atomic_write(
+            &fixture.root,
+            Path::new("nested/link.txt"),
+            b"inside\n",
+        )
+        .unwrap();
         assert_eq!(fs::read(&outside_file).unwrap(), b"outside\n");
-        assert_eq!(fs::read(fixture.root.join("nested/link.txt")).unwrap(), b"inside\n");
+        assert_eq!(
+            fs::read(fixture.root.join("nested/link.txt")).unwrap(),
+            b"inside\n"
+        );
     }
 
     #[test]
     fn rejects_symlinked_parent_components() {
         let fixture = Fixture::new();
         symlink(&fixture.outside, fixture.root.join("escape")).unwrap();
-        let error = atomic_write(&fixture.root, Path::new("escape/pwned.txt"), b"no\n")
-            .expect_err("symlink parent must fail");
+        let error = atomic_write(
+            &fixture.root,
+            Path::new("escape/pwned.txt"),
+            b"no\n",
+        )
+        .expect_err("symlink parent must fail");
         assert!(matches!(error, MutationError::Io(_)));
         assert!(!fixture.outside.join("pwned.txt").exists());
     }
@@ -364,7 +416,11 @@ mod tests {
     fn rejects_parent_traversal_and_host_root() {
         let fixture = Fixture::new();
         assert!(matches!(
-            atomic_write(&fixture.root, Path::new("../outside/pwned.txt"), b"no\n"),
+            atomic_write(
+                &fixture.root,
+                Path::new("../outside/pwned.txt"),
+                b"no\n"
+            ),
             Err(MutationError::InvalidPath)
         ));
         assert!(matches!(
