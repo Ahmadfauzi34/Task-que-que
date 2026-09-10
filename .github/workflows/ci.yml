@@ -26,6 +26,7 @@ jobs:
           sh -n gateway/tests/trycloudflare-smoke.sh
           sh -n tests/termux-shutdown-smoke.sh
           sh -n tests/worker-protocol-smoke.sh
+          sh -n tests/provider-availability-smoke.sh
           sh -n tests/termux-worker-protocol-smoke.sh
           bash -n tests/reference-document-worker-smoke.sh
           sh -n tests/termux-reference-document-worker-smoke.sh
@@ -110,8 +111,11 @@ jobs:
       - name: Build queue and worker binaries
         run: cargo build --locked --bin robust-sinkhorn-queue --bin robust-sinkhorn-worker
 
-      - name: Run separated worker data-plane proof
+      - name: Prove separated worker data-plane
         run: sh tests/worker-protocol-smoke.sh
+
+      - name: Prove live provider availability snapshot
+        run: sh tests/provider-availability-smoke.sh
 
   reference-worker-integration:
     name: Reference Document Worker
