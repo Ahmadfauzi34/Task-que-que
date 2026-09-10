@@ -107,6 +107,9 @@ STATUS="$(curl -sS -o "$TMP_DIR/symlink.json" -w '%{http_code}' -X POST \
 [ "$STATUS" = "403" ] || fail "outside-root symlink was not rejected"
 
 MCP_META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"termux-filesystem-proof","version":"1.0.0"},"io.modelcontextprotocol/clientCapabilities":{}}'
+# Strip the shell-only escaping above into a raw JSON object fragment once.
+MCP_META="$(printf '%s' "$MCP_META" | sed 's/\\"/"/g')"
+
 MCP_LIST="$(curl -fsS -X POST "http://127.0.0.1:$PORT/mcp" \
   -H "Authorization: Bearer $SESSION_TOKEN" \
   -H 'Content-Type: application/json' \
