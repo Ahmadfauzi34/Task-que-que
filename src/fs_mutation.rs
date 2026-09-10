@@ -17,6 +17,8 @@ pub enum MutationError {
     InvalidPath,
     #[error("write payload exceeds 1 MiB")]
     PayloadTooLarge,
+    #[error("filesystem mutation committed but parent durability could not be proven: {0}")]
+    CommittedDurabilityUnknown(io::Error),
     #[error("filesystem mutation failed: {0}")]
     Io(#[from] io::Error),
 }
@@ -213,7 +215,7 @@ pub fn atomic_write(root: &Path, relative_path: &Path, bytes: &[u8]) -> Result<(
     })?;
     let fd = temp_fd.expect("temp fd exists with temp name");
 
-    let write_result = (|| -> Result<(), MutationError> {
+    let precommit = (|| -> Result<(), MutationError> {
         let mut file = unsafe { File::from_raw_fd(fd) };
         file.write_all(bytes)?;
         file.sync_all()?;
@@ -230,14 +232,15 @@ pub fn atomic_write(root: &Path, relative_path: &Path, bytes: &[u8]) -> Result<(
         if rc < 0 {
             return Err(io::Error::last_os_error().into());
         }
-        fsync_fd(parent_fd)?;
         Ok(())
     })();
 
-    if write_result.is_err() {
+    if let Err(error) = precommit {
         unlinkat_best_effort(parent_fd, &temp_name);
+        return Err(error);
     }
-    write_result
+
+    fsync_fd(parent_fd).map_err(MutationError::CommittedDurabilityUnknown)
 }
 
 pub fn create_directory(root: &Path, relative_path: &Path) -> Result<(), MutationError> {
@@ -246,8 +249,7 @@ pub fn create_directory(root: &Path, relative_path: &Path) -> Result<(), Mutatio
     if rc < 0 {
         return Err(io::Error::last_os_error().into());
     }
-    fsync_fd(parent.as_raw_fd())?;
-    Ok(())
+    fsync_fd(parent.as_raw_fd()).map_err(MutationError::CommittedDurabilityUnknown)
 }
 
 #[cfg(test)]
