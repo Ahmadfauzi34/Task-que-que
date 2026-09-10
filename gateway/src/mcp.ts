@@ -4,6 +4,11 @@ import {
   type GatewayDependencies,
 } from "./app";
 import {
+  isCapabilityAvailable,
+  loadCapabilityAvailability,
+  type CapabilityAvailabilitySnapshot,
+} from "./capability-availability";
+import {
   resolveAuthorizationContext,
   type AuthorizationContext,
 } from "./capability-auth";
@@ -11,7 +16,6 @@ import {
   CAPABILITY_REGISTRY,
   evaluateCapabilityGrant,
   getCapability,
-  projectCapabilityCatalog,
   type CapabilityDescriptor,
 } from "./capabilities";
 
@@ -40,7 +44,9 @@ function serverInfo() {
   };
 }
 
-function withServerMeta<T extends Record<string, unknown>>(result: T): T & { _meta: Record<string, unknown> } {
+function withServerMeta<T extends Record<string, unknown>>(
+  result: T,
+): T & { _meta: Record<string, unknown> } {
   const existing = isRecord(result._meta) ? result._meta : {};
   return {
     ...result,
@@ -109,7 +115,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isJsonRpcId(value: unknown): value is JsonRpcId {
-  return typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value));
+  return typeof value === "string"
+    || (typeof value === "number" && Number.isSafeInteger(value));
 }
 
 function decodeMirroredHeader(value: string): string | null {
@@ -171,7 +178,12 @@ async function readBoundedJson(request: Request): Promise<unknown | Response> {
 }
 
 function parseJsonRpc(value: unknown): JsonRpcRequest | Response {
-  if (!isRecord(value) || value.jsonrpc !== "2.0" || !isJsonRpcId(value.id) || typeof value.method !== "string") {
+  if (
+    !isRecord(value)
+    || value.jsonrpc !== "2.0"
+    || !isJsonRpcId(value.id)
+    || typeof value.method !== "string"
+  ) {
     return rpcError(null, -32600, "Invalid Request", 400);
   }
   if (value.params !== undefined && !isRecord(value.params)) {
@@ -185,7 +197,10 @@ function parseJsonRpc(value: unknown): JsonRpcRequest | Response {
   };
 }
 
-function validateMetaAndHeaders(request: Request, rpc: JsonRpcRequest): Response | null {
+function validateMetaAndHeaders(
+  request: Request,
+  rpc: JsonRpcRequest,
+): Response | null {
   const meta = rpc.params._meta;
   if (!isRecord(meta)) {
     return rpcError(rpc.id, -32602, "missing MCP request _meta", 400);
@@ -199,18 +214,32 @@ function validateMetaAndHeaders(request: Request, rpc: JsonRpcRequest): Response
 
   const clientInfo = meta["io.modelcontextprotocol/clientInfo"];
   if (
-    clientInfo !== undefined &&
-    (!isRecord(clientInfo) || typeof clientInfo.name !== "string" || typeof clientInfo.version !== "string")
+    clientInfo !== undefined
+    && (
+      !isRecord(clientInfo)
+      || typeof clientInfo.name !== "string"
+      || typeof clientInfo.version !== "string"
+    )
   ) {
     return rpcError(rpc.id, -32602, "invalid MCP clientInfo metadata", 400);
   }
 
   const headerVersion = request.headers.get("mcp-protocol-version");
   if (!headerVersion) {
-    return rpcError(rpc.id, -32020, "Header mismatch: MCP-Protocol-Version is required", 400);
+    return rpcError(
+      rpc.id,
+      -32020,
+      "Header mismatch: MCP-Protocol-Version is required",
+      400,
+    );
   }
   if (headerVersion !== bodyVersion) {
-    return rpcError(rpc.id, -32020, "Header mismatch: MCP-Protocol-Version does not match request metadata", 400);
+    return rpcError(
+      rpc.id,
+      -32020,
+      "Header mismatch: MCP-Protocol-Version does not match request metadata",
+      400,
+    );
   }
   if (bodyVersion !== MCP_PROTOCOL_VERSION) {
     return rpcError(
@@ -224,7 +253,12 @@ function validateMetaAndHeaders(request: Request, rpc: JsonRpcRequest): Response
 
   const methodHeader = request.headers.get("mcp-method");
   if (!methodHeader || methodHeader !== rpc.method) {
-    return rpcError(rpc.id, -32020, "Header mismatch: Mcp-Method does not match request method", 400);
+    return rpcError(
+      rpc.id,
+      -32020,
+      "Header mismatch: Mcp-Method does not match request method",
+      400,
+    );
   }
 
   if (rpc.method === "tools/call") {
@@ -234,19 +268,41 @@ function validateMetaAndHeaders(request: Request, rpc: JsonRpcRequest): Response
     }
     const nameHeader = request.headers.get("mcp-name");
     if (!nameHeader) {
-      return rpcError(rpc.id, -32020, "Header mismatch: Mcp-Name is required for tools/call", 400);
+      return rpcError(
+        rpc.id,
+        -32020,
+        "Header mismatch: Mcp-Name is required for tools/call",
+        400,
+      );
     }
     const decoded = decodeMirroredHeader(nameHeader);
     if (decoded === null || decoded !== toolName) {
-      return rpcError(rpc.id, -32020, "Header mismatch: Mcp-Name does not match params.name", 400);
+      return rpcError(
+        rpc.id,
+        -32020,
+        "Header mismatch: Mcp-Name does not match params.name",
+        400,
+      );
     }
   }
 
   return null;
 }
 
-function capabilityAllowed(auth: AuthorizationContext, descriptor: CapabilityDescriptor): boolean {
+function capabilityAllowed(
+  auth: AuthorizationContext,
+  descriptor: CapabilityDescriptor,
+): boolean {
   return evaluateCapabilityGrant(auth.grant, descriptor).allowed;
+}
+
+function capabilityExecutable(
+  auth: AuthorizationContext,
+  descriptor: CapabilityDescriptor,
+  availability: CapabilityAvailabilitySnapshot,
+): boolean {
+  return capabilityAllowed(auth, descriptor)
+    && isCapabilityAvailable(descriptor, availability);
 }
 
 function taskSubmitSurface(): CapabilityDescriptor | null {
@@ -261,12 +317,17 @@ function toolPrerequisites(
   return submit ? [submit, descriptor] : [];
 }
 
-function accessibleTaskNames(auth: AuthorizationContext): string[] {
+function executableTaskNames(
+  auth: AuthorizationContext,
+  availability: CapabilityAvailabilitySnapshot,
+): string[] {
   const submit = taskSubmitSurface();
   if (!submit || !capabilityAllowed(auth, submit)) return [];
   return Object.values(CAPABILITY_REGISTRY)
-    .filter((descriptor) => descriptor.kind === "task" && descriptor.publiclyDiscoverable)
-    .filter((descriptor) => capabilityAllowed(auth, descriptor))
+    .filter(
+      (descriptor) => descriptor.kind === "task" && descriptor.publiclyDiscoverable,
+    )
+    .filter((descriptor) => capabilityExecutable(auth, descriptor, availability))
     .map((descriptor) => descriptor.name)
     .sort((left, right) => left.localeCompare(right));
 }
@@ -296,7 +357,10 @@ function positiveIdSchema(name: string) {
   };
 }
 
-function taskEnvelopeSchema(includeType: boolean, taskNames: readonly string[] = []) {
+function taskEnvelopeSchema(
+  includeType: boolean,
+  taskNames: readonly string[] = [],
+) {
   const properties: Record<string, unknown> = {
     payload: {},
     priority: { type: "integer" },
@@ -335,6 +399,7 @@ function workflowSubmitSchema() {
 function toolSchema(
   descriptor: CapabilityDescriptor,
   auth: AuthorizationContext,
+  availability: CapabilityAvailabilitySnapshot,
 ): Record<string, unknown> | null {
   switch (descriptor.name) {
     case "system.health":
@@ -344,7 +409,7 @@ function toolSchema(
     case "task.inspect":
       return positiveIdSchema("task_id");
     case "task.submit": {
-      const taskNames = accessibleTaskNames(auth);
+      const taskNames = executableTaskNames(auth, availability);
       return taskNames.length > 0 ? taskEnvelopeSchema(true, taskNames) : null;
     }
     case "workflow.inspect":
@@ -361,12 +426,18 @@ function toolSchema(
 function mcpTool(
   descriptor: CapabilityDescriptor,
   auth: AuthorizationContext,
+  availability: CapabilityAvailabilitySnapshot,
 ): Record<string, unknown> | null {
   const prerequisites = toolPrerequisites(descriptor);
-  if (prerequisites.length === 0 || prerequisites.some((item) => !capabilityAllowed(auth, item))) {
+  if (
+    prerequisites.length === 0
+    || prerequisites.some((item) => !capabilityAllowed(auth, item))
+    || !isCapabilityAvailable(descriptor, availability)
+  ) {
     return null;
   }
-  const inputSchema = toolSchema(descriptor, auth);
+
+  const inputSchema = toolSchema(descriptor, auth, availability);
   if (!inputSchema) return null;
 
   return {
@@ -380,6 +451,9 @@ function mcpTool(
         min_depth: descriptor.minDepth,
         min_authority: descriptor.minAuthority,
         required_scopes: descriptor.requiredScopes,
+        authorized: true,
+        available: true,
+        executable: true,
         mutates_state: descriptor.mutatesState,
         cancellable: descriptor.cancellable,
         durable: descriptor.durable,
@@ -388,17 +462,24 @@ function mcpTool(
   };
 }
 
-function listTools(auth: AuthorizationContext): Record<string, unknown>[] {
+function listTools(
+  auth: AuthorizationContext,
+  availability: CapabilityAvailabilitySnapshot,
+): Record<string, unknown>[] {
   return Object.values(CAPABILITY_REGISTRY)
     .filter((descriptor) => descriptor.publiclyDiscoverable)
     .sort((left, right) => left.name.localeCompare(right.name))
-    .map((descriptor) => mcpTool(descriptor, auth))
+    .map((descriptor) => mcpTool(descriptor, auth, availability))
     .filter((tool): tool is Record<string, unknown> => tool !== null);
 }
 
-function exactKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
+function exactKeys(
+  record: Record<string, unknown>,
+  allowed: readonly string[],
+): boolean {
   const keys = Object.keys(record);
-  return keys.length === allowed.length && keys.every((key) => allowed.includes(key));
+  return keys.length === allowed.length
+    && keys.every((key) => allowed.includes(key));
 }
 
 function validIdempotencyKey(value: unknown): value is string {
@@ -413,10 +494,22 @@ function taskArguments(
     ? ["type", "payload", "priority", "max_retries", "idempotency_key"] as const
     : ["payload", "priority", "max_retries", "idempotency_key"] as const;
   if (!exactKeysSubset(args, allowed)) return null;
-  if (!("payload" in args) || !validIdempotencyKey(args.idempotency_key)) return null;
-  if (includeType && (typeof args.type !== "string" || args.type.length === 0)) return null;
+  if (!("payload" in args) || !validIdempotencyKey(args.idempotency_key)) {
+    return null;
+  }
+  if (
+    includeType
+    && (typeof args.type !== "string" || args.type.length === 0)
+  ) {
+    return null;
+  }
   if (args.priority !== undefined && !Number.isInteger(args.priority)) return null;
-  if (args.max_retries !== undefined && (!Number.isInteger(args.max_retries) || (args.max_retries as number) < 0)) return null;
+  if (
+    args.max_retries !== undefined
+    && (!Number.isInteger(args.max_retries) || (args.max_retries as number) < 0)
+  ) {
+    return null;
+  }
 
   return {
     body: {
@@ -429,7 +522,10 @@ function taskArguments(
   };
 }
 
-function exactKeysSubset(record: Record<string, unknown>, allowed: readonly string[]): boolean {
+function exactKeysSubset(
+  record: Record<string, unknown>,
+  allowed: readonly string[],
+): boolean {
   return Object.keys(record).every((key) => allowed.includes(key));
 }
 
@@ -461,15 +557,22 @@ function invocationForTool(
   source: Request,
   descriptor: CapabilityDescriptor,
   auth: AuthorizationContext,
+  availability: CapabilityAvailabilitySnapshot,
   args: Record<string, unknown>,
 ): Request | null {
   switch (descriptor.name) {
     case "system.health":
-      return exactKeys(args, []) ? gatewayRequest(source, "/healthz", "GET") : null;
+      return exactKeys(args, [])
+        ? gatewayRequest(source, "/healthz", "GET")
+        : null;
     case "system.readiness":
-      return exactKeys(args, []) ? gatewayRequest(source, "/readyz", "GET") : null;
+      return exactKeys(args, [])
+        ? gatewayRequest(source, "/readyz", "GET")
+        : null;
     case "system.capabilities":
-      return exactKeys(args, []) ? gatewayRequest(source, "/v1/capabilities", "GET") : null;
+      return exactKeys(args, [])
+        ? gatewayRequest(source, "/v1/capabilities", "GET")
+        : null;
     case "task.inspect":
       return exactKeys(args, ["task_id"]) && positiveInteger(args.task_id)
         ? gatewayRequest(source, `/v1/tasks/${args.task_id}`, "GET")
@@ -478,8 +581,20 @@ function invocationForTool(
       const parsed = taskArguments(args, true);
       if (!parsed || typeof parsed.body.type !== "string") return null;
       const target = getCapability(CAPABILITY_REGISTRY, parsed.body.type);
-      if (!target || target.kind !== "task" || !capabilityAllowed(auth, target)) return null;
-      return gatewayRequest(source, "/v1/tasks", "POST", parsed.body, parsed.idempotencyKey);
+      if (
+        !target
+        || target.kind !== "task"
+        || !capabilityExecutable(auth, target, availability)
+      ) {
+        return null;
+      }
+      return gatewayRequest(
+        source,
+        "/v1/tasks",
+        "POST",
+        parsed.body,
+        parsed.idempotencyKey,
+      );
     }
     case "workflow.inspect":
       return exactKeys(args, ["workflow_id"]) && positiveInteger(args.workflow_id)
@@ -494,10 +609,20 @@ function invocationForTool(
         ? gatewayRequest(source, `/v1/workflows/${args.workflow_id}/cancel`, "POST")
         : null;
     case "workflow.submit": {
-      if (!exactKeys(args, ["workflow", "idempotency_key"]) || !isRecord(args.workflow) || !validIdempotencyKey(args.idempotency_key)) {
+      if (
+        !exactKeys(args, ["workflow", "idempotency_key"])
+        || !isRecord(args.workflow)
+        || !validIdempotencyKey(args.idempotency_key)
+      ) {
         return null;
       }
-      return gatewayRequest(source, "/v1/workflows", "POST", args.workflow, args.idempotency_key);
+      return gatewayRequest(
+        source,
+        "/v1/workflows",
+        "POST",
+        args.workflow,
+        args.idempotency_key,
+      );
     }
     default: {
       if (descriptor.kind !== "task") return null;
@@ -525,7 +650,9 @@ async function gatewayToolResult(
   } catch {
     return rpcResult(id, {
       resultType: "complete",
-      content: [{ type: "text", text: "Task-que-que gateway invocation failed." }],
+      content: [
+        { type: "text", text: "Task-que-que gateway invocation failed." },
+      ],
       isError: true,
     });
   }
@@ -537,7 +664,12 @@ async function gatewayToolResult(
   } catch {
     return rpcResult(id, {
       resultType: "complete",
-      content: [{ type: "text", text: `Gateway returned HTTP ${response.status} with invalid JSON.` }],
+      content: [
+        {
+          type: "text",
+          text: `Gateway returned HTTP ${response.status} with invalid JSON.`,
+        },
+      ],
       isError: true,
     });
   }
@@ -550,7 +682,8 @@ async function gatewayToolResult(
     isError: !response.ok,
     _meta: {
       "com.taskqueque/gatewayStatus": response.status,
-      "com.taskqueque/gatewayVersion": response.headers.get("x-gateway-version") ?? GATEWAY_VERSION,
+      "com.taskqueque/gatewayVersion":
+        response.headers.get("x-gateway-version") ?? GATEWAY_VERSION,
     },
   });
 }
@@ -559,6 +692,7 @@ async function handleToolsCall(
   source: Request,
   rpc: JsonRpcRequest,
   auth: AuthorizationContext,
+  availability: CapabilityAvailabilitySnapshot,
   invokeGateway: GatewayInvoker,
 ): Promise<Response> {
   const name = rpc.params.name;
@@ -571,14 +705,24 @@ async function handleToolsCall(
   if (!descriptor || !descriptor.publiclyDiscoverable) {
     return rpcError(rpc.id, -32602, "unknown or unavailable tool");
   }
-  const tool = mcpTool(descriptor, auth);
+  const tool = mcpTool(descriptor, auth, availability);
   if (!tool) {
     return rpcError(rpc.id, -32602, "unknown or unavailable tool");
   }
 
-  const invocation = invocationForTool(source, descriptor, auth, args);
+  const invocation = invocationForTool(
+    source,
+    descriptor,
+    auth,
+    availability,
+    args,
+  );
   if (!invocation) {
-    return rpcError(rpc.id, -32602, "tool arguments do not satisfy the advertised input schema");
+    return rpcError(
+      rpc.id,
+      -32602,
+      "tool arguments do not satisfy the advertised input schema",
+    );
   }
 
   return gatewayToolResult(rpc.id, invocation, invokeGateway);
@@ -596,12 +740,27 @@ export async function handleMcpRequest(
     return rpcError(null, -32000, "Origin is not allowed", 403);
   }
   if (request.method !== "POST") {
-    return rpcError(null, -32600, "MCP endpoint requires POST", 405, undefined, { allow: "POST" });
+    return rpcError(
+      null,
+      -32600,
+      "MCP endpoint requires POST",
+      405,
+      undefined,
+      { allow: "POST" },
+    );
   }
 
   const accept = request.headers.get("accept")?.toLowerCase() ?? "";
-  if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
-    return rpcError(null, -32600, "Accept must include application/json and text/event-stream", 406);
+  if (
+    !accept.includes("application/json")
+    || !accept.includes("text/event-stream")
+  ) {
+    return rpcError(
+      null,
+      -32600,
+      "Accept must include application/json and text/event-stream",
+      406,
+    );
   }
 
   const parsed = await readBoundedJson(request);
@@ -634,7 +793,7 @@ export async function handleMcpRequest(
           tools: { listChanged: false },
         },
         instructions:
-          "Task-que-que exposes only capabilities allowed by the bearer grant. Use system.capabilities to inspect deeper registered capabilities and their blockers.",
+          "Task-que-que advertises only capabilities that are both authorized by the bearer grant and backed by a live provider. Use system.capabilities to inspect registered capabilities, authorization blockers, and runtime availability.",
         ttlMs: MCP_LIST_TTL_MS,
         cacheScope: "private",
       },
@@ -644,13 +803,18 @@ export async function handleMcpRequest(
 
   if (rpc.method === "tools/list") {
     if (rpc.params.cursor !== undefined) {
-      return rpcError(rpc.id, -32602, "pagination cursor is not supported because this tool set fits in one page");
+      return rpcError(
+        rpc.id,
+        -32602,
+        "pagination cursor is not supported because this tool set fits in one page",
+      );
     }
+    const availability = await loadCapabilityAvailability(dependencies);
     return rpcResult(
       rpc.id,
       {
         resultType: "complete",
-        tools: listTools(auth),
+        tools: listTools(auth, availability),
         ttlMs: MCP_LIST_TTL_MS,
         cacheScope: "private",
       },
@@ -659,7 +823,14 @@ export async function handleMcpRequest(
   }
 
   if (rpc.method === "tools/call") {
-    return handleToolsCall(request, rpc, auth, invokeGateway);
+    const availability = await loadCapabilityAvailability(dependencies);
+    return handleToolsCall(
+      request,
+      rpc,
+      auth,
+      availability,
+      invokeGateway,
+    );
   }
 
   return rpcError(rpc.id, -32601, "Method not found", 404);
