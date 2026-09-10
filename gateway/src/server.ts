@@ -14,6 +14,7 @@ const dependencies = {
   config,
   registry: TASK_REGISTRY,
   admissionController,
+  providerFetchImpl: fetch,
 };
 
 const server = Bun.serve({
@@ -44,6 +45,7 @@ const server = Bun.serve({
 console.log("Task Queue Bun Gateway");
 console.log(`listen : http://${config.hostname}:${server.port}`);
 console.log(`queue  : ${config.queueDaemonOrigin}`);
+console.log(`broker : ${config.workerBrokerOrigin}`);
 console.log(`auth   : ${config.allowUnauthenticated ? "explicitly disabled" : "bearer token required"}`);
 console.log(`tasks  : ${Object.keys(TASK_REGISTRY).join(", ") || "none"}`);
 console.log(`enqueue: ${config.enqueueRatePerSecond}/s, burst ${config.enqueueBurst}`);
