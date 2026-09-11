@@ -70,10 +70,15 @@ It includes:
 - delegated read-only `filesystem.read`
 - delegated mutation `filesystem.write`
 - delegated mutation `filesystem.mkdir`
+- delegated Git metadata `git.head`
+- delegated Git metadata `git.log`
+- delegated Git metadata `git.refs`
 
 `agent.invoke` is a D5 delegated-system capability because it crosses into a remote-agent provider. Runtime availability is separate: if the remote-agent worker is disabled, registration and authorization do not imply that an executor is online.
 
-The filesystem provider is the first host-system D5 provider. It is disabled unless the operator configures `GATEWAY_FILESYSTEM_ROOT`. The configured root is server-owned policy: callers receive only relative-path operations and cannot override the root.
+## Filesystem provider
+
+The filesystem provider is disabled unless the operator configures `GATEWAY_FILESYSTEM_ROOT`. The configured root is server-owned policy: callers receive only relative-path operations and cannot override the root.
 
 Read-only filesystem capabilities remain Bun-native and A0:
 
@@ -96,7 +101,29 @@ They are available only when both `GATEWAY_FILESYSTEM_ROOT` and the server-owned
 
 The mutation result model preserves proof state rather than guessing from transport behavior. A Rust `committed_durability_unknown` result is explicitly reported as committed with unknown durability and `retry_safe=false`. A timeout, unrecognized subprocess exit, or other loss of the final mutator proof is reported as `committed="unknown"`, `durability="unknown"`, and `retry_safe=false`, because the subprocess may have crossed the commit point before the gateway lost its result. Only the Rust substrate's explicit pre-commit `mutation_io_error` may be projected as `committed=false`.
 
-Filesystem delete, arbitrary rename, package installation, arbitrary process execution, Git mutation, and general outbound networking are still **not** capabilities. They require separate providers and proof gates.
+When filesystem mutation is enabled, the mutator executable itself must be outside the delegated writable root. This prevents a scoped filesystem grant from replacing the provider binary that enforces that grant.
+
+## Git metadata provider
+
+The first Git provider is intentionally metadata-only. It exposes:
+
+```text
+git.head -> D5 / A0 / git.inspect
+git.log  -> D5 / A0 / git.inspect
+git.refs -> D5 / A0 / git.inspect
+```
+
+The operator selects exactly one repository with `GATEWAY_GIT_REPOSITORY` and one executable with `GATEWAY_GIT_BIN`. Callers cannot supply a repository, revision, ref, pathspec, command, or Git option. Both configured paths must be absolute canonical non-symlink identities, and the repository must be a standard non-bare checkout with a real `.git` directory.
+
+The subprocess provider uses fixed argv without a shell, bounded stdout/stderr, and a timeout. Inherited `GIT_*` variables are removed; system/global Git config, paging, replacement objects, optional locks, fsmonitor, hooks, and lazy promisor fetch are disabled or overridden for the command boundary. Public projections contain only bounded hashes, timestamps, parent hashes, branch names and local branch/tag refs. Repository and executable paths are not returned.
+
+Working-tree `status` and `diff` are deliberately excluded. Repository configuration can make apparently read-only working-tree inspection invoke filters, fsmonitor, textconv or other helpers. The initial provider therefore limits itself to metadata operations that do not need to process working-tree file content.
+
+Git also documents that commands should not be run against an untrusted `.git` control directory because repository configuration and hooks may execute commands. Task-que-que therefore keeps the Git control plane outside any generic writable filesystem delegation: when `filesystem.write`/`filesystem.mkdir` are enabled, `GATEWAY_GIT_REPOSITORY` and `GATEWAY_GIT_BIN` must not be inside `GATEWAY_FILESYSTEM_ROOT`. A safe topology may place the writable filesystem root inside a working-tree subdirectory such as `repository/src`, while the repository root and `.git` remain outside that writable delegation.
+
+The Git metadata provider is runtime-available only after its canonical repository/binary identities are validated and its fixed `probe` returns the exact configured repository. MCP exposes all three Git metadata tools with an empty argument schema, so an MCP client cannot smuggle a revision, pathspec or alternate command into the provider.
+
+Filesystem delete, arbitrary rename, package installation, arbitrary process execution, Git mutation, working-tree Git inspection, and general outbound networking are still **not** capabilities. They require separate providers and proof gates.
 
 ## Compatibility state
 
@@ -130,7 +157,7 @@ MCP tools/list
 
 A low-depth agent can still inspect registered deeper capabilities through `system.capabilities`, while `tools/list` advertises only capabilities that are both authorized and available.
 
-For read-only filesystem tools, availability requires the server-configured delegated root to resolve to a readable directory. For mutation tools, availability additionally requires a successful Rust mutator `probe`. The absolute root and mutator binary path are never part of MCP tool arguments or public result projection.
+For read-only filesystem tools, availability requires the server-configured delegated root to resolve to a readable directory. For mutation tools, availability additionally requires a successful Rust mutator `probe`. For Git metadata tools, availability requires the canonical server-owned repository and executable identities plus a successful Git metadata `probe`. Absolute provider paths are never part of MCP tool arguments or public result projections.
 
 ## Proof obligations for privileged providers
 

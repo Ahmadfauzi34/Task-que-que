@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
+import { access, lstat, realpath } from "node:fs/promises";
 import { posix } from "node:path";
 
 import {
@@ -191,6 +193,17 @@ export const defaultFilesystemMutationRunner: FilesystemMutationRunner = async (
   else child.stdin?.end();
 });
 
+async function canonicalExecutableAvailable(binary: string): Promise<boolean> {
+  try {
+    const stat = await lstat(binary);
+    if (!stat.isFile()) return false;
+    await access(binary, fsConstants.X_OK);
+    return posix.normalize(await realpath(binary)) === binary;
+  } catch {
+    return false;
+  }
+}
+
 async function invokeMutator(
   dependencies: GatewayDependencies,
   operation: FilesystemMutationOperation,
@@ -201,8 +214,12 @@ async function invokeMutator(
   const binary = dependencies.config.filesystemMutatorBin;
   if (!root || !binary) return { ok: false, error: "mutation_process_unavailable" };
 
-  const runner = (dependencies as MutationAwareDependencies).filesystemMutationRunImpl
-    ?? defaultFilesystemMutationRunner;
+  const injectedRunner = (dependencies as MutationAwareDependencies).filesystemMutationRunImpl;
+  if (!injectedRunner && !await canonicalExecutableAvailable(binary)) {
+    return { ok: false, error: "mutation_process_unavailable" };
+  }
+
+  const runner = injectedRunner ?? defaultFilesystemMutationRunner;
   try {
     return await runner({
       binary,

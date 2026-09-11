@@ -37,6 +37,9 @@ function requiredSurface(path: string, method: string): string | null {
   if (path === "/v1/filesystem/read" && method === "POST") return "filesystem.read";
   if (path === "/v1/filesystem/write" && method === "POST") return "filesystem.write";
   if (path === "/v1/filesystem/mkdir" && method === "POST") return "filesystem.mkdir";
+  if (path === "/v1/git/head" && method === "GET") return "git.head";
+  if (path === "/v1/git/log" && method === "GET") return "git.log";
+  if (path === "/v1/git/refs" && method === "GET") return "git.refs";
   return null;
 }
 

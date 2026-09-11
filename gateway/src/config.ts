@@ -7,6 +7,8 @@ export interface GatewayConfig {
   workerBrokerOrigin?: string;
   filesystemRoot?: string | null;
   filesystemMutatorBin?: string | null;
+  gitRepository?: string | null;
+  gitBin?: string | null;
   apiToken: string | null;
   allowUnauthenticated: boolean;
   upstreamTimeoutMs: number;
@@ -66,31 +68,84 @@ function parseLoopbackOrigin(raw: string, name: string): string {
   return url.origin;
 }
 
-function parseFilesystemRoot(raw: string | undefined): string | null {
+function parseAbsoluteProviderPath(
+  raw: string | undefined,
+  name: string,
+  rootError: string,
+): string | null {
   const value = raw?.trim();
   if (!value) return null;
   if (value.includes("\0") || value.length > 4_096 || !posix.isAbsolute(value)) {
-    throw new Error("GATEWAY_FILESYSTEM_ROOT must be a bounded absolute POSIX path");
+    throw new Error(`${name} must be a bounded absolute POSIX path`);
   }
-
   const normalized = posix.normalize(value);
   if (normalized === "/") {
-    throw new Error("GATEWAY_FILESYSTEM_ROOT must not delegate the filesystem root /");
+    throw new Error(rootError);
   }
   return normalized;
 }
 
+function parseFilesystemRoot(raw: string | undefined): string | null {
+  return parseAbsoluteProviderPath(
+    raw,
+    "GATEWAY_FILESYSTEM_ROOT",
+    "GATEWAY_FILESYSTEM_ROOT must not delegate the filesystem root /",
+  );
+}
+
 function parseFilesystemMutatorBin(raw: string | undefined): string | null {
-  const value = raw?.trim();
-  if (!value) return null;
-  if (value.includes("\0") || value.length > 4_096 || !posix.isAbsolute(value)) {
-    throw new Error("GATEWAY_FILESYSTEM_MUTATOR_BIN must be a bounded absolute POSIX path");
+  return parseAbsoluteProviderPath(
+    raw,
+    "GATEWAY_FILESYSTEM_MUTATOR_BIN",
+    "GATEWAY_FILESYSTEM_MUTATOR_BIN must identify a binary, not /",
+  );
+}
+
+function parseGitRepository(raw: string | undefined): string | null {
+  return parseAbsoluteProviderPath(
+    raw,
+    "GATEWAY_GIT_REPOSITORY",
+    "GATEWAY_GIT_REPOSITORY must not delegate the filesystem root /",
+  );
+}
+
+function parseGitBin(raw: string | undefined): string | null {
+  return parseAbsoluteProviderPath(
+    raw,
+    "GATEWAY_GIT_BIN",
+    "GATEWAY_GIT_BIN must identify a binary, not /",
+  );
+}
+
+function pathIsSameOrWithin(root: string, candidate: string): boolean {
+  const relative = posix.relative(root, candidate);
+  return relative === ""
+    || (relative !== ".." && !relative.startsWith("../") && !posix.isAbsolute(relative));
+}
+
+function validateProviderIsolation(
+  filesystemRoot: string | null,
+  filesystemMutatorBin: string | null,
+  gitRepository: string | null,
+  gitBin: string | null,
+): void {
+  if (!filesystemRoot || !filesystemMutatorBin) return;
+
+  if (pathIsSameOrWithin(filesystemRoot, filesystemMutatorBin)) {
+    throw new Error(
+      "GATEWAY_FILESYSTEM_MUTATOR_BIN must be outside the delegated writable filesystem root",
+    );
   }
-  const normalized = posix.normalize(value);
-  if (normalized === "/") {
-    throw new Error("GATEWAY_FILESYSTEM_MUTATOR_BIN must identify a binary, not /");
+  if (gitRepository && pathIsSameOrWithin(filesystemRoot, gitRepository)) {
+    throw new Error(
+      "GATEWAY_GIT_REPOSITORY control directory must be outside the delegated writable filesystem root",
+    );
   }
-  return normalized;
+  if (gitBin && pathIsSameOrWithin(filesystemRoot, gitBin)) {
+    throw new Error(
+      "GATEWAY_GIT_BIN must be outside the delegated writable filesystem root",
+    );
+  }
 }
 
 export function loadGatewayConfig(
@@ -138,6 +193,20 @@ export function loadGatewayConfig(
     );
   }
 
+  const filesystemRoot = parseFilesystemRoot(env.GATEWAY_FILESYSTEM_ROOT);
+  const filesystemMutatorBin = parseFilesystemMutatorBin(
+    env.GATEWAY_FILESYSTEM_MUTATOR_BIN,
+  );
+  const gitRepository = parseGitRepository(env.GATEWAY_GIT_REPOSITORY);
+  const gitBin = parseGitBin(env.GATEWAY_GIT_BIN);
+
+  validateProviderIsolation(
+    filesystemRoot,
+    filesystemMutatorBin,
+    gitRepository,
+    gitBin,
+  );
+
   return {
     hostname,
     port,
@@ -149,10 +218,10 @@ export function loadGatewayConfig(
       env.WORKER_BROKER_URL?.trim() || DEFAULT_WORKER_BROKER,
       "WORKER_BROKER_URL",
     ),
-    filesystemRoot: parseFilesystemRoot(env.GATEWAY_FILESYSTEM_ROOT),
-    filesystemMutatorBin: parseFilesystemMutatorBin(
-      env.GATEWAY_FILESYSTEM_MUTATOR_BIN,
-    ),
+    filesystemRoot,
+    filesystemMutatorBin,
+    gitRepository,
+    gitBin,
     apiToken,
     allowUnauthenticated,
     upstreamTimeoutMs,

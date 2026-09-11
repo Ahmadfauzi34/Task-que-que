@@ -30,6 +30,7 @@ jobs:
           sh -n tests/termux-filesystem-provider-smoke.sh
           sh -n tests/termux-filesystem-mutation-provider-smoke.sh
           sh -n tests/filesystem-mutation-substrate-smoke.sh
+          sh -n tests/termux-git-metadata-provider-smoke.sh
           sh -n tests/termux-worker-protocol-smoke.sh
           bash -n tests/reference-document-worker-smoke.sh
           sh -n tests/termux-reference-document-worker-smoke.sh
@@ -87,6 +88,11 @@ jobs:
         env:
           TASK_QUEUE_BUN_BIN: bun
         run: sh tests/termux-filesystem-provider-smoke.sh
+
+      - name: Prove bounded D5 Git metadata provider
+        env:
+          TASK_QUEUE_BUN_BIN: bun
+        run: sh tests/termux-git-metadata-provider-smoke.sh
 
   gateway-integration:
     name: Bun to Rust Integration

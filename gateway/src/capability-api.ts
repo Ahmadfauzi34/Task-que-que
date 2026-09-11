@@ -100,6 +100,7 @@ export async function handleCapabilityRequest(
       worker_registry_reachable: availability.providerReachable,
       filesystem_reachable: availability.filesystemReachable,
       filesystem_mutation_reachable: availability.filesystemMutationReachable,
+      git_metadata_reachable: availability.gitMetadataReachable,
     },
     capabilities,
   });
