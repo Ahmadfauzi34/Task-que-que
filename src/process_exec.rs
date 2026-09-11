@@ -206,7 +206,7 @@ fn c_arguments(binary: &Path, arguments: &[String]) -> Result<(Vec<CString>, Vec
     let mut values = Vec::with_capacity(arguments.len() + 1);
     values.push(CString::new(binary_text).map_err(|_| ProcessExecError::InvalidArgument)?);
     for argument in arguments {
-        if argument.as_bytes().contains(&0) || argument.as_bytes().len() > MAX_ARGUMENT_BYTES {
+        if argument.as_bytes().contains(&0) || argument.len() > MAX_ARGUMENT_BYTES {
             return Err(ProcessExecError::InvalidArgument);
         }
         values.push(CString::new(argument.as_str()).map_err(|_| ProcessExecError::InvalidArgument)?);
