@@ -117,6 +117,37 @@ function parseGitBin(raw: string | undefined): string | null {
   );
 }
 
+function pathIsSameOrWithin(root: string, candidate: string): boolean {
+  const relative = posix.relative(root, candidate);
+  return relative === ""
+    || (relative !== ".." && !relative.startsWith("../") && !posix.isAbsolute(relative));
+}
+
+function validateProviderIsolation(
+  filesystemRoot: string | null,
+  filesystemMutatorBin: string | null,
+  gitRepository: string | null,
+  gitBin: string | null,
+): void {
+  if (!filesystemRoot || !filesystemMutatorBin) return;
+
+  if (pathIsSameOrWithin(filesystemRoot, filesystemMutatorBin)) {
+    throw new Error(
+      "GATEWAY_FILESYSTEM_MUTATOR_BIN must be outside the delegated writable filesystem root",
+    );
+  }
+  if (gitRepository && pathIsSameOrWithin(filesystemRoot, gitRepository)) {
+    throw new Error(
+      "GATEWAY_GIT_REPOSITORY control directory must be outside the delegated writable filesystem root",
+    );
+  }
+  if (gitBin && pathIsSameOrWithin(filesystemRoot, gitBin)) {
+    throw new Error(
+      "GATEWAY_GIT_BIN must be outside the delegated writable filesystem root",
+    );
+  }
+}
+
 export function loadGatewayConfig(
   env: Record<string, string | undefined> = process.env,
 ): GatewayConfig {
@@ -162,6 +193,20 @@ export function loadGatewayConfig(
     );
   }
 
+  const filesystemRoot = parseFilesystemRoot(env.GATEWAY_FILESYSTEM_ROOT);
+  const filesystemMutatorBin = parseFilesystemMutatorBin(
+    env.GATEWAY_FILESYSTEM_MUTATOR_BIN,
+  );
+  const gitRepository = parseGitRepository(env.GATEWAY_GIT_REPOSITORY);
+  const gitBin = parseGitBin(env.GATEWAY_GIT_BIN);
+
+  validateProviderIsolation(
+    filesystemRoot,
+    filesystemMutatorBin,
+    gitRepository,
+    gitBin,
+  );
+
   return {
     hostname,
     port,
@@ -173,12 +218,10 @@ export function loadGatewayConfig(
       env.WORKER_BROKER_URL?.trim() || DEFAULT_WORKER_BROKER,
       "WORKER_BROKER_URL",
     ),
-    filesystemRoot: parseFilesystemRoot(env.GATEWAY_FILESYSTEM_ROOT),
-    filesystemMutatorBin: parseFilesystemMutatorBin(
-      env.GATEWAY_FILESYSTEM_MUTATOR_BIN,
-    ),
-    gitRepository: parseGitRepository(env.GATEWAY_GIT_REPOSITORY),
-    gitBin: parseGitBin(env.GATEWAY_GIT_BIN),
+    filesystemRoot,
+    filesystemMutatorBin,
+    gitRepository,
+    gitBin,
     apiToken,
     allowUnauthenticated,
     upstreamTimeoutMs,
