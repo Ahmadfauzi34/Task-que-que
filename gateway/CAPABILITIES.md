@@ -68,12 +68,14 @@ It includes:
 - delegated read-only `filesystem.list`
 - delegated read-only `filesystem.stat`
 - delegated read-only `filesystem.read`
+- delegated mutation `filesystem.write`
+- delegated mutation `filesystem.mkdir`
 
 `agent.invoke` is a D5 delegated-system capability because it crosses into a remote-agent provider. Runtime availability is separate: if the remote-agent worker is disabled, registration and authorization do not imply that an executor is online.
 
 The filesystem provider is the first host-system D5 provider. It is disabled unless the operator configures `GATEWAY_FILESYSTEM_ROOT`. The configured root is server-owned policy: callers receive only relative-path operations and cannot override the root.
 
-The filesystem capabilities are intentionally read-only:
+Read-only filesystem capabilities remain Bun-native and A0:
 
 ```text
 filesystem.list  -> D5 / A0 / filesystem.inspect
@@ -81,9 +83,20 @@ filesystem.stat  -> D5 / A0 / filesystem.inspect
 filesystem.read  -> D5 / A0 / filesystem.read
 ```
 
-The provider rejects absolute caller paths, parent traversal, backslashes, NULs, symlink targets outside the canonical root, and a configured root that resolves to `/`. Directory listings and text reads are bounded, and file reads accept UTF-8 text only.
+Mutation capabilities are separate A3 surfaces:
 
-Filesystem write/delete, package installation, arbitrary process execution, Git mutation, and general outbound networking are still **not** capabilities. They require separate providers and proof gates.
+```text
+filesystem.write -> D5 / A3 / filesystem.write
+filesystem.mkdir -> D5 / A3 / filesystem.mkdir
+```
+
+They are available only when both `GATEWAY_FILESYSTEM_ROOT` and the server-owned `GATEWAY_FILESYSTEM_MUTATOR_BIN` are configured and the Rust mutator's `probe` succeeds. Bun performs authentication, signed depth/authority/scope proof and bounded request validation, but does not implement filesystem mutation. The actual write/mkdir operation is delegated to the PR #44 fd-relative Rust substrate.
+
+`filesystem.write` accepts bounded UTF-8 content only in this version. The Rust substrate performs exact relative-path validation, fd-relative traversal, temp-file + same-directory atomic replacement, file/parent durability sync, and symlink-safe mutation. `filesystem.mkdir` uses the same fd-relative root/parent proof and `mkdirat` boundary.
+
+The mutation result model preserves `committed_durability_unknown`. A mutation that committed but whose final durability sync could not be proven is explicitly reported as committed with unknown durability and `retry_safe=false`; callers must not blindly retry it.
+
+Filesystem delete, arbitrary rename, package installation, arbitrary process execution, Git mutation, and general outbound networking are still **not** capabilities. They require separate providers and proof gates.
 
 ## Compatibility state
 
@@ -117,7 +130,7 @@ MCP tools/list
 
 A low-depth agent can still inspect registered deeper capabilities through `system.capabilities`, while `tools/list` advertises only capabilities that are both authorized and available.
 
-For filesystem tools, availability requires the server-configured delegated root to resolve to a readable directory. The absolute root is never part of the MCP tool arguments or public result projection.
+For read-only filesystem tools, availability requires the server-configured delegated root to resolve to a readable directory. For mutation tools, availability additionally requires a successful Rust mutator `probe`. The absolute root and mutator binary path are never part of MCP tool arguments or public result projection.
 
 ## Proof obligations for privileged providers
 
