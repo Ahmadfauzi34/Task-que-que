@@ -15,16 +15,9 @@ afterEach(async () => {
     const path = cleanup.pop();
     if (path) await rm(path, { recursive: true, force: true });
   }
-  delete process.env.TASK_QUEUE_PROCESS_SHOULD_NOT_LEAK;
 });
 
-async function fixture(
-  options: {
-    args?: string[];
-    timeoutMs?: number;
-    maxOutputBytes?: number;
-  } = {},
-) {
+async function fixture() {
   const base = await mkdtemp(join(tmpdir(), "tqq-process-substrate-"));
   cleanup.push(base);
   const cwd = await realpath(base);
@@ -33,13 +26,10 @@ async function fixture(
   const descriptor = {
     name: "proof.command",
     binary,
-    args: options.args ?? [
-      "-e",
-      "console.log(JSON.stringify({cwd:process.cwd(), leaked:process.env.TASK_QUEUE_PROCESS_SHOULD_NOT_LEAK ?? null, path:process.env.PATH ?? null}))",
-    ],
+    args: ["--version"],
     cwd,
-    timeout_ms: options.timeoutMs ?? 1_000,
-    max_output_bytes: options.maxOutputBytes ?? 64 * 1024,
+    timeout_ms: 1_000,
+    max_output_bytes: 64 * 1024,
   };
   await writeFile(
     registryPath,
@@ -50,7 +40,7 @@ async function fixture(
 }
 
 describe("registered process substrate", () => {
-  test("loads only a canonical registry with canonical executable and cwd identities", async () => {
+  test("loads only canonical native executables, registry and cwd identities", async () => {
     const { base, registryPath, binary, cwd } = await fixture();
     const registry = await loadRegisteredProcessRegistry(registryPath);
     expect(registry.version).toBe(1);
@@ -88,6 +78,29 @@ describe("registered process substrate", () => {
     await expect(loadRegisteredProcessRegistry(badRegistry)).rejects.toThrow(
       "binary must be a regular file",
     );
+
+    const script = join(base, "script.sh");
+    await writeFile(script, "#!/bin/sh\nexit 0\n", "utf8");
+    await chmod(script, 0o700);
+    const scriptRegistry = join(base, "script.json");
+    await writeFile(
+      scriptRegistry,
+      `${JSON.stringify({
+        version: 1,
+        commands: [{
+          name: "proof.command",
+          binary: script,
+          args: [],
+          cwd,
+          timeout_ms: 1_000,
+          max_output_bytes: 1_024,
+        }],
+      })}\n`,
+      "utf8",
+    );
+    await expect(loadRegisteredProcessRegistry(scriptRegistry)).rejects.toThrow(
+      "native ELF executable",
+    );
   });
 
   test("keeps registry, executable and cwd outside a writable delegated root", async () => {
@@ -106,7 +119,7 @@ describe("registered process substrate", () => {
     ).rejects.toThrow("registry must be outside the writable filesystem root");
 
     const binaryInside = join(writableRoot, "registered-tool");
-    await writeFile(binaryInside, "#!/bin/sh\nexit 0\n", "utf8");
+    await writeFile(binaryInside, await Bun.file(binary).arrayBuffer());
     await chmod(binaryInside, 0o700);
     const binaryRegistry = join(base, "binary-inside.json");
     await writeFile(
@@ -144,44 +157,24 @@ describe("registered process substrate", () => {
     expect(cwd).toBe(base);
   });
 
-  test("runs only fixed registered argv in a scrubbed minimal environment", async () => {
-    const { registryPath, cwd } = await fixture();
-    process.env.TASK_QUEUE_PROCESS_SHOULD_NOT_LEAK = "secret";
+  test("fails closed before process execution on unknown command, cancellation and bad helper", async () => {
+    const { registryPath } = await fixture();
     const registry = await loadRegisteredProcessRegistry(registryPath);
 
-    const missing = await runRegisteredProcess(registry, "proof.missing");
-    expect(missing).toEqual({ ok: false, error: "unregistered_process" });
+    expect(await runRegisteredProcess(registry, "proof.missing", {
+      helperBin: "/definitely/missing/process-exec",
+    })).toEqual({ ok: false, error: "unregistered_process" });
 
-    const result = await runRegisteredProcess(registry, "proof.command");
-    expect(result.ok).toBe(true);
-    expect(result.exit_code).toBe(0);
-    expect(result.stderr).toBe("");
-    const parsed = JSON.parse((result.stdout ?? "").trim()) as Record<string, unknown>;
-    expect(parsed).toEqual({ cwd, leaked: null, path: "/nonexistent" });
-  });
+    const controller = new AbortController();
+    controller.abort();
+    expect(await runRegisteredProcess(registry, "proof.command", {
+      helperBin: "/definitely/missing/process-exec",
+      signal: controller.signal,
+    })).toEqual({ ok: false, error: "process_cancelled" });
 
-  test("fails closed on bounded output overflow", async () => {
-    const { registryPath } = await fixture({
-      args: ["-e", "console.log('x'.repeat(8192))"],
-      maxOutputBytes: 256,
-    });
-    const registry = await loadRegisteredProcessRegistry(registryPath);
-    expect(await runRegisteredProcess(registry, "proof.command")).toEqual({
-      ok: false,
-      error: "process_output_too_large",
-    });
-  });
-
-  test("kills a registered command that exceeds its server-owned timeout", async () => {
-    const { registryPath } = await fixture({
-      args: ["-e", "await new Promise((resolve) => setTimeout(resolve, 1000))"],
-      timeoutMs: 100,
-    });
-    const registry = await loadRegisteredProcessRegistry(registryPath);
-    expect(await runRegisteredProcess(registry, "proof.command")).toEqual({
-      ok: false,
-      error: "process_timeout",
-    });
+    expect(await runRegisteredProcess(registry, "proof.command", {
+      helperBin: "/definitely/missing/process-exec",
+    })).toEqual({ ok: false, error: "process_unavailable" });
   });
 
   test("rejects duplicate names and caller-like descriptor ambiguity", async () => {

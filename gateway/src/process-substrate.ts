@@ -12,6 +12,7 @@ const MAX_OUTPUT_BYTES_LIMIT = 256 * 1024;
 const MIN_TIMEOUT_MS = 100;
 const MAX_TIMEOUT_MS = 30_000;
 const COMMAND_NAME = /^[a-z][a-z0-9._-]{0,63}$/;
+const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
 
 export interface RegisteredProcessDescriptor {
   name: string;
@@ -28,6 +29,11 @@ export interface RegisteredProcessRegistry {
   source: string;
 }
 
+export interface RegisteredProcessExecutionOptions {
+  helperBin: string;
+  signal?: AbortSignal;
+}
+
 export interface RegisteredProcessResult {
   ok: boolean;
   exit_code?: number;
@@ -37,6 +43,7 @@ export interface RegisteredProcessResult {
     | "unregistered_process"
     | "process_unavailable"
     | "process_timeout"
+    | "process_cancelled"
     | "process_output_too_large"
     | "process_failed";
 }
@@ -70,12 +77,23 @@ function pathIsSameOrWithin(root: string, candidate: string): boolean {
     || (relative !== ".." && !relative.startsWith("../") && !posix.isAbsolute(relative));
 }
 
-async function validateCanonicalExecutable(path: string): Promise<void> {
+async function validateCanonicalNativeExecutable(path: string, label: string): Promise<void> {
   const stat = await lstat(path);
-  if (!stat.isFile()) throw new Error("registered process binary must be a regular file");
+  if (!stat.isFile()) throw new Error(`${label} must be a regular file`);
   await access(path, fsConstants.X_OK);
   if (posix.normalize(await realpath(path)) !== path) {
-    throw new Error("registered process binary must be canonical and non-symlink");
+    throw new Error(`${label} must be canonical and non-symlink`);
+  }
+
+  const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const magic = Buffer.alloc(ELF_MAGIC.byteLength);
+    const { bytesRead } = await handle.read(magic, 0, magic.byteLength, 0);
+    if (bytesRead !== ELF_MAGIC.byteLength || !magic.equals(ELF_MAGIC)) {
+      throw new Error(`${label} must be a native ELF executable`);
+    }
+  } finally {
+    await handle.close();
   }
 }
 
@@ -199,7 +217,7 @@ export async function loadRegisteredProcessRegistry(
       if (writableRoot && pathIsSameOrWithin(writableRoot, descriptor.cwd)) {
         throw new Error("registered process cwd must be outside the writable filesystem root");
       }
-      await validateCanonicalExecutable(descriptor.binary);
+      await validateCanonicalNativeExecutable(descriptor.binary, "registered process binary");
       await validateCanonicalDirectory(descriptor.cwd);
       commands.set(descriptor.name, descriptor);
     }
@@ -218,30 +236,58 @@ function minimalProcessEnvironment(): NodeJS.ProcessEnv {
   };
 }
 
+function killProcessGroup(child: ReturnType<typeof spawn>): void {
+  const pid = child.pid;
+  if (pid !== undefined) {
+    try {
+      process.kill(-pid, "SIGKILL");
+      return;
+    } catch {
+      // Fall back to the direct child if the process group disappeared or was
+      // never established. The default Linux/Android path uses a detached
+      // helper as group leader, so this is fail-closed cleanup only.
+    }
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // The child may already be terminal.
+  }
+}
+
 export async function runRegisteredProcess(
   registry: RegisteredProcessRegistry,
   name: string,
+  options: RegisteredProcessExecutionOptions,
 ): Promise<RegisteredProcessResult> {
   const descriptor = registry.commands.get(name);
   if (!descriptor) return { ok: false, error: "unregistered_process" };
+  if (options.signal?.aborted) return { ok: false, error: "process_cancelled" };
 
-  // Re-prove executable/cwd identity immediately before spawn. This still does
-  // not provide fd-bound exec semantics; therefore this substrate remains
-  // internal-only until a stronger execution boundary is proven.
+  let helperBin: string;
   try {
-    await validateCanonicalExecutable(descriptor.binary);
-    await validateCanonicalDirectory(descriptor.cwd);
+    helperBin = validateAbsolutePath(options.helperBin, "registered process helper");
+    await validateCanonicalNativeExecutable(helperBin, "registered process helper");
   } catch {
     return { ok: false, error: "process_unavailable" };
   }
 
+  const helperArguments = [
+    "--binary",
+    descriptor.binary,
+    "--cwd",
+    descriptor.cwd,
+    "--",
+    ...descriptor.args,
+  ];
+
   return new Promise((resolve) => {
-    let child;
+    let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(descriptor.binary, descriptor.args, {
-        cwd: descriptor.cwd,
+      child = spawn(helperBin, helperArguments, {
         env: minimalProcessEnvironment(),
         shell: false,
+        detached: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch {
@@ -250,35 +296,43 @@ export async function runRegisteredProcess(
     }
 
     let settled = false;
+    let terminationError: RegisteredProcessResult["error"] | null = null;
     let stdoutBytes = 0;
     let stderrBytes = 0;
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const abortListener = () => terminate("process_cancelled");
 
     const finish = (result: RegisteredProcessResult) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer !== null) clearTimeout(timer);
+      options.signal?.removeEventListener("abort", abortListener);
       resolve(result);
     };
 
-    const overflow = () => {
-      child.kill("SIGKILL");
-      finish({ ok: false, error: "process_output_too_large" });
+    const terminate = (error: RegisteredProcessResult["error"]) => {
+      if (settled || terminationError !== null) return;
+      terminationError = error;
+      killProcessGroup(child);
     };
 
     child.stdout?.on("data", (chunk: Buffer) => {
+      if (terminationError !== null) return;
       stdoutBytes += chunk.byteLength;
       if (stdoutBytes + stderrBytes > descriptor.max_output_bytes) {
-        overflow();
+        terminate("process_output_too_large");
         return;
       }
       stdout.push(chunk);
     });
     child.stderr?.on("data", (chunk: Buffer) => {
+      if (terminationError !== null) return;
       stderrBytes += chunk.byteLength;
       if (stdoutBytes + stderrBytes > descriptor.max_output_bytes) {
-        overflow();
+        terminate("process_output_too_large");
         return;
       }
       stderr.push(chunk);
@@ -287,6 +341,10 @@ export async function runRegisteredProcess(
     child.on("error", () => finish({ ok: false, error: "process_unavailable" }));
     child.on("close", (code) => {
       if (settled) return;
+      if (terminationError !== null) {
+        finish({ ok: false, error: terminationError });
+        return;
+      }
       const result = {
         exit_code: code ?? -1,
         stdout: Buffer.concat(stdout, stdoutBytes).toString("utf8"),
@@ -297,9 +355,13 @@ export async function runRegisteredProcess(
         : { ok: false, error: "process_failed", ...result });
     });
 
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish({ ok: false, error: "process_timeout" });
+    options.signal?.addEventListener("abort", abortListener, { once: true });
+    if (options.signal?.aborted) {
+      terminate("process_cancelled");
+    }
+
+    timer = setTimeout(() => {
+      terminate("process_timeout");
     }, descriptor.timeout_ms);
   });
 }

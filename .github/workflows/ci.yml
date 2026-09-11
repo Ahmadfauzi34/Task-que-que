@@ -33,6 +33,7 @@ jobs:
           sh -n tests/termux-git-metadata-provider-smoke.sh
           sh -n tests/termux-process-substrate-smoke.sh
           sh -n tests/process-exec-substrate-smoke.sh
+          sh -n tests/termux-process-helper-integration-smoke.sh
           sh -n tests/termux-worker-protocol-smoke.sh
           bash -n tests/reference-document-worker-smoke.sh
           sh -n tests/termux-reference-document-worker-smoke.sh
@@ -101,7 +102,7 @@ jobs:
           TASK_QUEUE_BUN_BIN: bun
         run: sh tests/termux-git-metadata-provider-smoke.sh
 
-      - name: Prove internal registered process substrate
+      - name: Prove internal registered process policy substrate
         env:
           TASK_QUEUE_BUN_BIN: bun
         run: sh tests/termux-process-substrate-smoke.sh
@@ -122,8 +123,8 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Build Rust queue daemon, worker broker and filesystem mutator
-        run: cargo build --locked --bin robust-sinkhorn-queue --bin robust-sinkhorn-worker --bin robust-sinkhorn-fs-mutator
+      - name: Build Rust queue daemon, worker broker and provider helpers
+        run: cargo build --locked --bin robust-sinkhorn-queue --bin robust-sinkhorn-worker --bin robust-sinkhorn-fs-mutator --bin robust-sinkhorn-process-exec
 
       - name: Run localhost protocol smoke test
         run: bash gateway/tests/e2e.sh
@@ -134,6 +135,13 @@ jobs:
         run: |
           TASK_QUEUE_FS_MUTATOR_BIN="$GITHUB_WORKSPACE/target/debug/robust-sinkhorn-fs-mutator" \
             sh tests/termux-filesystem-mutation-provider-smoke.sh
+
+      - name: Prove registry to fd-bound process helper integration
+        env:
+          TASK_QUEUE_BUN_BIN: bun
+        run: |
+          TASK_QUEUE_PROCESS_EXEC_BIN="$GITHUB_WORKSPACE/target/debug/robust-sinkhorn-process-exec" \
+            sh tests/termux-process-helper-integration-smoke.sh
 
   worker-integration:
     name: Worker Protocol Integration
