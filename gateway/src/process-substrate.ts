@@ -64,6 +64,12 @@ function validateAbsolutePath(value: unknown, name: string): string {
   return normalized;
 }
 
+function pathIsSameOrWithin(root: string, candidate: string): boolean {
+  const relative = posix.relative(root, candidate);
+  return relative === ""
+    || (relative !== ".." && !relative.startsWith("../") && !posix.isAbsolute(relative));
+}
+
 async function validateCanonicalExecutable(path: string): Promise<void> {
   const stat = await lstat(path);
   if (!stat.isFile()) throw new Error("registered process binary must be a regular file");
@@ -137,8 +143,16 @@ function parseDescriptor(value: unknown): RegisteredProcessDescriptor {
 
 export async function loadRegisteredProcessRegistry(
   configuredPath: string,
+  writableFilesystemRoot?: string | null,
 ): Promise<RegisteredProcessRegistry> {
   const registryPath = validateAbsolutePath(configuredPath, "registered process registry");
+  const writableRoot = writableFilesystemRoot
+    ? validateAbsolutePath(writableFilesystemRoot, "writable filesystem root")
+    : null;
+  if (writableRoot && pathIsSameOrWithin(writableRoot, registryPath)) {
+    throw new Error("registered process registry must be outside the writable filesystem root");
+  }
+
   let handle;
   try {
     handle = await open(registryPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
@@ -178,6 +192,12 @@ export async function loadRegisteredProcessRegistry(
       const descriptor = parseDescriptor(item);
       if (commands.has(descriptor.name)) {
         throw new Error(`duplicate registered process name: ${descriptor.name}`);
+      }
+      if (writableRoot && pathIsSameOrWithin(writableRoot, descriptor.binary)) {
+        throw new Error("registered process binary must be outside the writable filesystem root");
+      }
+      if (writableRoot && pathIsSameOrWithin(writableRoot, descriptor.cwd)) {
+        throw new Error("registered process cwd must be outside the writable filesystem root");
       }
       await validateCanonicalExecutable(descriptor.binary);
       await validateCanonicalDirectory(descriptor.cwd);
