@@ -27,7 +27,7 @@ esac
 
 cd "$ROOT_DIR/gateway"
 TASK_QUEUE_PROCESS_EXEC_BIN="$HELPER_BIN" \
-  "$BUN_BIN" test tests/process_helper_integration.integration.ts
+  "$BUN_BIN" test ./tests/process_helper_integration.integration.ts
 
 printf 'Registered process fd-bound integration proof state\n'
 printf 'registry -> Rust helper                  : OK\n'
