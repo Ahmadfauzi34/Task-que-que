@@ -48,7 +48,8 @@ jobs:
           cargo build --release --locked --target aarch64-linux-android \
             --bin robust-sinkhorn-queue \
             --bin robust-sinkhorn-worker \
-            --bin robust-sinkhorn-fs-mutator
+            --bin robust-sinkhorn-fs-mutator \
+            --bin robust-sinkhorn-process-exec
 
       - name: Validate produced ELFs
         shell: bash
@@ -57,7 +58,8 @@ jobs:
           for BIN in \
             target/aarch64-linux-android/release/robust-sinkhorn-queue \
             target/aarch64-linux-android/release/robust-sinkhorn-worker \
-            target/aarch64-linux-android/release/robust-sinkhorn-fs-mutator
+            target/aarch64-linux-android/release/robust-sinkhorn-fs-mutator \
+            target/aarch64-linux-android/release/robust-sinkhorn-process-exec
           do
             test -f "$BIN"
             file "$BIN"
@@ -81,6 +83,8 @@ jobs:
             dist/robust-sinkhorn-worker-aarch64-linux-android
           cp target/aarch64-linux-android/release/robust-sinkhorn-fs-mutator \
             dist/robust-sinkhorn-fs-mutator-aarch64-linux-android
+          cp target/aarch64-linux-android/release/robust-sinkhorn-process-exec \
+            dist/robust-sinkhorn-process-exec-aarch64-linux-android
           (
             cd dist
             sha256sum robust-sinkhorn-queue-aarch64-linux-android \
@@ -89,6 +93,8 @@ jobs:
               > robust-sinkhorn-worker-aarch64-linux-android.sha256
             sha256sum robust-sinkhorn-fs-mutator-aarch64-linux-android \
               > robust-sinkhorn-fs-mutator-aarch64-linux-android.sha256
+            sha256sum robust-sinkhorn-process-exec-aarch64-linux-android \
+              > robust-sinkhorn-process-exec-aarch64-linux-android.sha256
           )
 
       - name: Upload workflow artifact
@@ -102,6 +108,8 @@ jobs:
             dist/robust-sinkhorn-worker-aarch64-linux-android.sha256
             dist/robust-sinkhorn-fs-mutator-aarch64-linux-android
             dist/robust-sinkhorn-fs-mutator-aarch64-linux-android.sha256
+            dist/robust-sinkhorn-process-exec-aarch64-linux-android
+            dist/robust-sinkhorn-process-exec-aarch64-linux-android.sha256
           if-no-files-found: error
           retention-days: 30
 

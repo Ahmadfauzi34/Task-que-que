@@ -3,6 +3,7 @@ pub mod fs_mutation;
 pub mod idempotency;
 pub mod lease_fence;
 pub mod local_api;
+pub mod process_exec;
 pub mod provider_api;
 pub mod result_projection;
 pub mod retention;
