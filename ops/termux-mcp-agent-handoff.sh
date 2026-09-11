@@ -99,8 +99,8 @@ cleanup() {
 }
 trap cleanup 0
 
-READY_STATUS="$(curl -sS --max-time 3 -o "$TMP_DIR/ready.json" -w '%{http_code}' "$LOCAL_ORIGIN/readyz" || true)"
-[ "$READY_STATUS" = "200" ] || fail "local gateway is not ready at $LOCAL_ORIGIN (HTTP ${READY_STATUS:-000})"
+HEALTH_STATUS="$(curl -sS --max-time 3 -o "$TMP_DIR/health.json" -w '%{http_code}' "$LOCAL_ORIGIN/healthz" || true)"
+[ "$HEALTH_STATUS" = "200" ] || fail "local gateway is not healthy at $LOCAL_ORIGIN (HTTP ${HEALTH_STATUS:-000})"
 
 REQUEST_BODY="{\"depth\":$DEPTH,\"authority\":$AUTHORITY,\"scopes\":[$SCOPES_JSON],\"ttl_seconds\":$TTL_SECONDS}"
 SESSION_STATUS="$(
