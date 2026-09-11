@@ -375,6 +375,28 @@ function filesystemPathSchema() {
   };
 }
 
+function filesystemWriteSchema() {
+  return {
+    type: "object",
+    properties: {
+      path: {
+        type: "string",
+        minLength: 1,
+        maxLength: MAX_FILESYSTEM_PATH_CHARS,
+        description:
+          "Exact relative POSIX path inside the server-configured filesystem root. Dot traversal, repeated separators, absolute paths, and backslashes are rejected.",
+      },
+      content: {
+        type: "string",
+        description:
+          "UTF-8 file content. The gateway and Rust mutation substrate enforce a 1 MiB byte ceiling.",
+      },
+    },
+    required: ["path", "content"],
+    additionalProperties: false,
+  };
+}
+
 function taskEnvelopeSchema(
   includeType: boolean,
   taskNames: readonly string[] = [],
@@ -421,6 +443,13 @@ function toolSchema(
 ): Record<string, unknown> | null {
   if (descriptor.provider === "bun-filesystem") {
     return filesystemPathSchema();
+  }
+  if (descriptor.provider === "rust-fs-mutator") {
+    return descriptor.name === "filesystem.write"
+      ? filesystemWriteSchema()
+      : descriptor.name === "filesystem.mkdir"
+        ? filesystemPathSchema()
+        : null;
   }
 
   switch (descriptor.name) {
@@ -599,6 +628,31 @@ function invocationForTool(
       return null;
     }
     return gatewayRequest(source, descriptor.route, "POST", { path: args.path });
+  }
+
+  if (descriptor.provider === "rust-fs-mutator") {
+    if (descriptor.method !== "POST" || !descriptor.route) return null;
+    if (descriptor.name === "filesystem.write") {
+      if (
+        !exactKeys(args, ["path", "content"])
+        || !validFilesystemPath(args.path)
+        || typeof args.content !== "string"
+        || encoder.encode(args.content).byteLength > MAX_PUBLIC_REQUEST_BYTES
+      ) {
+        return null;
+      }
+      return gatewayRequest(
+        source,
+        descriptor.route,
+        "POST",
+        { path: args.path, content: args.content },
+      );
+    }
+    if (descriptor.name === "filesystem.mkdir") {
+      if (!exactKeys(args, ["path"]) || !validFilesystemPath(args.path)) return null;
+      return gatewayRequest(source, descriptor.route, "POST", { path: args.path });
+    }
+    return null;
   }
 
   switch (descriptor.name) {
@@ -834,7 +888,7 @@ export async function handleMcpRequest(
           tools: { listChanged: false },
         },
         instructions:
-          "Task-que-que advertises only capabilities that are both authorized by the bearer grant and backed by a live provider. Delegated filesystem tools are confined to a server-configured root. Use system.capabilities to inspect registered capabilities, authorization blockers, and runtime availability.",
+          "Task-que-que advertises only capabilities that are both authorized by the bearer grant and backed by a live provider. Delegated filesystem tools are confined to a server-configured root, and mutation tools execute only through the Rust fd-relative mutator. Use system.capabilities to inspect registered capabilities, authorization blockers, and runtime availability.",
         ttlMs: MCP_LIST_TTL_MS,
         cacheScope: "private",
       },

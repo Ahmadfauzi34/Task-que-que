@@ -2,6 +2,7 @@ import type { FetchLike, GatewayDependencies } from "./app";
 import type { CapabilityDescriptor } from "./capabilities";
 import { DEFAULT_WORKER_BROKER } from "./config";
 import { filesystemRootAvailable } from "./filesystem-api";
+import { filesystemMutationAvailable } from "./filesystem-mutation-api";
 
 interface ProviderAwareDependencies extends GatewayDependencies {
   providerFetchImpl?: FetchLike;
@@ -10,13 +11,18 @@ interface ProviderAwareDependencies extends GatewayDependencies {
 export interface CapabilityAvailabilitySnapshot {
   providerReachable: boolean;
   filesystemReachable: boolean;
+  filesystemMutationReachable: boolean;
   activeTaskNames: ReadonlySet<string>;
 }
 
-function unavailableSnapshot(filesystemReachable: boolean): CapabilityAvailabilitySnapshot {
+function unavailableSnapshot(
+  filesystemReachable: boolean,
+  filesystemMutationReachable: boolean,
+): CapabilityAvailabilitySnapshot {
   return Object.freeze({
     providerReachable: false,
     filesystemReachable,
+    filesystemMutationReachable,
     activeTaskNames: new Set<string>(),
   });
 }
@@ -35,11 +41,14 @@ function safeTaskName(value: unknown): value is string {
 export async function loadCapabilityAvailability(
   dependencies: GatewayDependencies,
 ): Promise<CapabilityAvailabilitySnapshot> {
-  const filesystemReachable = await filesystemRootAvailable(
-    dependencies.config.filesystemRoot,
-  );
+  const [filesystemReachable, filesystemMutationReachable] = await Promise.all([
+    filesystemRootAvailable(dependencies.config.filesystemRoot),
+    filesystemMutationAvailable(dependencies),
+  ]);
   const providerFetchImpl = (dependencies as ProviderAwareDependencies).providerFetchImpl;
-  if (!providerFetchImpl) return unavailableSnapshot(filesystemReachable);
+  if (!providerFetchImpl) {
+    return unavailableSnapshot(filesystemReachable, filesystemMutationReachable);
+  }
 
   const origin = dependencies.config.workerBrokerOrigin ?? DEFAULT_WORKER_BROKER;
   const controller = new AbortController();
@@ -51,26 +60,31 @@ export async function loadCapabilityAvailability(
       headers: { accept: "application/json" },
       signal: controller.signal,
     });
-    if (response.status !== 200) return unavailableSnapshot(filesystemReachable);
+    if (response.status !== 200) {
+      return unavailableSnapshot(filesystemReachable, filesystemMutationReachable);
+    }
 
     const parsed: unknown = await response.json();
     if (!isRecord(parsed) || parsed.schema_version !== 1 || !Array.isArray(parsed.active_task_names)) {
-      return unavailableSnapshot(filesystemReachable);
+      return unavailableSnapshot(filesystemReachable, filesystemMutationReachable);
     }
 
     const activeTaskNames = new Set<string>();
     for (const value of parsed.active_task_names) {
-      if (!safeTaskName(value)) return unavailableSnapshot(filesystemReachable);
+      if (!safeTaskName(value)) {
+        return unavailableSnapshot(filesystemReachable, filesystemMutationReachable);
+      }
       activeTaskNames.add(value);
     }
 
     return Object.freeze({
       providerReachable: true,
       filesystemReachable,
+      filesystemMutationReachable,
       activeTaskNames,
     });
   } catch {
-    return unavailableSnapshot(filesystemReachable);
+    return unavailableSnapshot(filesystemReachable, filesystemMutationReachable);
   } finally {
     clearTimeout(timer);
   }
@@ -82,6 +96,10 @@ export function isCapabilityAvailable(
 ): boolean {
   if (descriptor.provider === "bun-filesystem") {
     return snapshot.filesystemReachable;
+  }
+
+  if (descriptor.provider === "rust-fs-mutator") {
+    return snapshot.filesystemMutationReachable;
   }
 
   if (descriptor.kind === "task") {

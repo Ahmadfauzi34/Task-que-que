@@ -28,6 +28,7 @@ jobs:
           sh -n tests/worker-protocol-smoke.sh
           sh -n tests/provider-availability-smoke.sh
           sh -n tests/termux-filesystem-provider-smoke.sh
+          sh -n tests/termux-filesystem-mutation-provider-smoke.sh
           sh -n tests/filesystem-mutation-substrate-smoke.sh
           sh -n tests/termux-worker-protocol-smoke.sh
           bash -n tests/reference-document-worker-smoke.sh
@@ -103,11 +104,18 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Build Rust queue daemon and worker broker
-        run: cargo build --locked --bin robust-sinkhorn-queue --bin robust-sinkhorn-worker
+      - name: Build Rust queue daemon, worker broker and filesystem mutator
+        run: cargo build --locked --bin robust-sinkhorn-queue --bin robust-sinkhorn-worker --bin robust-sinkhorn-fs-mutator
 
       - name: Run localhost protocol smoke test
         run: bash gateway/tests/e2e.sh
+
+      - name: Prove Rust-backed D5 filesystem mutation facade
+        env:
+          TASK_QUEUE_BUN_BIN: bun
+        run: |
+          TASK_QUEUE_FS_MUTATOR_BIN="$GITHUB_WORKSPACE/target/debug/robust-sinkhorn-fs-mutator" \
+            sh tests/termux-filesystem-mutation-provider-smoke.sh
 
   worker-integration:
     name: Worker Protocol Integration

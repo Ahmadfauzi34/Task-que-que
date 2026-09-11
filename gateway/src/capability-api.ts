@@ -99,6 +99,7 @@ export async function handleCapabilityRequest(
     runtime: {
       worker_registry_reachable: availability.providerReachable,
       filesystem_reachable: availability.filesystemReachable,
+      filesystem_mutation_reachable: availability.filesystemMutationReachable,
     },
     capabilities,
   });

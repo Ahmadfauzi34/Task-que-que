@@ -48,6 +48,20 @@ describe("capability inventory", () => {
       minAuthority: CAPABILITY_AUTHORITY.MUTATE_SCOPED,
       queueKind: "remote-agent",
     });
+    expect(getCapability(CAPABILITY_REGISTRY, "filesystem.write")).toMatchObject({
+      provider: "rust-fs-mutator",
+      minDepth: CAPABILITY_DEPTH.DELEGATED_SYSTEM,
+      minAuthority: CAPABILITY_AUTHORITY.MUTATE_SCOPED,
+      requiredScopes: ["filesystem.write"],
+      route: "/v1/filesystem/write",
+    });
+    expect(getCapability(CAPABILITY_REGISTRY, "filesystem.mkdir")).toMatchObject({
+      provider: "rust-fs-mutator",
+      minDepth: CAPABILITY_DEPTH.DELEGATED_SYSTEM,
+      minAuthority: CAPABILITY_AUTHORITY.MUTATE_SCOPED,
+      requiredScopes: ["filesystem.mkdir"],
+      route: "/v1/filesystem/mkdir",
+    });
   });
 });
 
@@ -94,6 +108,21 @@ describe("depth and authority are independent proof dimensions", () => {
     expect(evaluateCapabilityGrant(grant, descriptor!)).toEqual({
       allowed: false,
       blockedBy: ["scope"],
+    });
+  });
+
+  test("A0 filesystem sessions cannot mutate even with mutation scopes", () => {
+    const descriptor = getCapability(CAPABILITY_REGISTRY, "filesystem.write");
+    expect(descriptor).not.toBeNull();
+
+    const grant: CapabilityGrant = {
+      depth: CAPABILITY_DEPTH.DELEGATED_SYSTEM,
+      authority: CAPABILITY_AUTHORITY.OBSERVE,
+      scopes: ["filesystem.write"],
+    };
+    expect(evaluateCapabilityGrant(grant, descriptor!)).toEqual({
+      allowed: false,
+      blockedBy: ["authority"],
     });
   });
 
