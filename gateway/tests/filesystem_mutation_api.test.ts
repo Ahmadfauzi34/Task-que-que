@@ -71,6 +71,21 @@ async function session(
   );
 }
 
+async function writeWithRunner(runner: FilesystemMutationRunner) {
+  const issued = await session(
+    CAPABILITY_AUTHORITY.MUTATE_SCOPED,
+    ["filesystem.write"],
+  );
+  return routeGatewayRequest(
+    request(
+      "/v1/filesystem/write",
+      issued.token,
+      { path: "proof.txt", content: "mutation proof" },
+    ),
+    dependencies(runner),
+  );
+}
+
 describe("D5 Rust-backed filesystem mutation facade", () => {
   test("passes bounded write and mkdir operations to the server-owned Rust mutator", async () => {
     const commands: FilesystemMutationCommand[] = [];
@@ -173,19 +188,8 @@ describe("D5 Rust-backed filesystem mutation facade", () => {
       ok: false,
       error: "committed_durability_unknown",
     });
-    const issued = await session(
-      CAPABILITY_AUTHORITY.MUTATE_SCOPED,
-      ["filesystem.write"],
-    );
 
-    const response = await routeGatewayRequest(
-      request(
-        "/v1/filesystem/write",
-        issued.token,
-        { path: "proof.txt", content: "maybe durable" },
-      ),
-      dependencies(runner),
-    );
+    const response = await writeWithRunner(runner);
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({
       error: {
@@ -194,6 +198,41 @@ describe("D5 Rust-backed filesystem mutation facade", () => {
         committed: true,
         durability: "unknown",
         retry_safe: false,
+      },
+    });
+  });
+
+  test("does not misclassify timeout or unrecognized process exit as pre-commit", async () => {
+    for (const [error, status] of [
+      ["mutation_process_timeout", 504],
+      ["mutation_process_error", 500],
+      ["future_unknown_error", 500],
+    ] as const) {
+      const response = await writeWithRunner(async () => ({ ok: false, error }));
+      expect(response.status).toBe(status);
+      expect(await response.json()).toMatchObject({
+        error: {
+          code: "filesystem_mutation_outcome_unknown",
+          committed: "unknown",
+          durability: "unknown",
+          retry_safe: false,
+        },
+      });
+    }
+  });
+
+  test("maps the Rust pre-commit I/O proof separately from unknown subprocess outcomes", async () => {
+    const response = await writeWithRunner(async () => ({
+      ok: false,
+      error: "mutation_io_error",
+    }));
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      error: {
+        code: "filesystem_mutation_failed",
+        message: "filesystem mutation failed before commit",
+        committed: false,
+        retry_safe: true,
       },
     });
   });
