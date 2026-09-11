@@ -2,10 +2,10 @@ import { TokenBucketAdmissionController } from "./admission";
 import { MAX_PUBLIC_REQUEST_BYTES } from "./app";
 import { loadGatewayConfig } from "./config";
 import {
-  handleMcpRequestWithRegisteredProcesses,
+  handleMcpRequestWithOAuthDiscovery,
   MCP_ENDPOINT,
   MCP_PROTOCOL_VERSION,
-} from "./mcp-process";
+} from "./mcp-oauth";
 import { TASK_REGISTRY } from "./registry";
 import { routeGatewayRequest } from "./router";
 
@@ -27,7 +27,7 @@ const server = Bun.serve({
   maxRequestBodySize: MAX_PUBLIC_REQUEST_BYTES,
   idleTimeout: 10,
   async fetch(request) {
-    const mcpResponse = await handleMcpRequestWithRegisteredProcesses(
+    const mcpResponse = await handleMcpRequestWithOAuthDiscovery(
       request,
       dependencies,
       (inner) => routeGatewayRequest(inner, dependencies),
@@ -54,6 +54,7 @@ console.log(`auth   : ${config.allowUnauthenticated ? "explicitly disabled" : "b
 console.log(`tasks  : ${Object.keys(TASK_REGISTRY).join(", ") || "none"}`);
 console.log(`enqueue: ${config.enqueueRatePerSecond}/s, burst ${config.enqueueBurst}`);
 console.log(`mcp    : ${MCP_ENDPOINT} (${MCP_PROTOCOL_VERSION})`);
+console.log(`oauth resource discovery: ${config.oauthAuthorizationServer ? "configured" : "disabled"}`);
 console.log(`filesystem: ${config.filesystemRoot ? "scoped read-only provider configured" : "disabled"}`);
 console.log(`process: ${config.processRegistryFile && config.processExecBin ? "registered fixed operations configured" : "disabled"}`);
 console.log("capability api: /v1/capabilities");
