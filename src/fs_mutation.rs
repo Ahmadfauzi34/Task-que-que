@@ -112,18 +112,41 @@ fn open_path_dir_at(parent: RawFd, name: &CStr) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-fn open_readable_parent(parent: RawFd) -> io::Result<OwnedFd> {
+fn open_readable_parent(parent: OwnedFd) -> io::Result<OwnedFd> {
+    let parent_file = File::from(parent);
+    let expected = parent_file.metadata()?;
+    if !expected.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "validated parent fd is not a directory",
+        ));
+    }
+
+    // The lookup target is the kernel-defined "." of an already validated
+    // directory fd, not an agent-controlled path component. Android/bionic can
+    // reject O_NOFOLLOW on this reopen even though the O_PATH parent is valid,
+    // so prove safety by fd identity instead of relying on that flag here.
     let fd = unsafe {
         sys::openat(
-            parent,
+            parent_file.as_raw_fd(),
             c".".as_ptr(),
-            sys::O_RDONLY | sys::O_DIRECTORY | sys::O_NOFOLLOW | sys::O_CLOEXEC,
+            sys::O_RDONLY | sys::O_DIRECTORY | sys::O_CLOEXEC,
         )
     };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+
+    let readable = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    let actual = readable.metadata()?;
+    if !actual.is_dir() || (actual.dev(), actual.ino()) != (expected.dev(), expected.ino()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "readable parent fd identity mismatch",
+        ));
+    }
+
+    Ok(readable.into())
 }
 
 fn open_host_root() -> io::Result<OwnedFd> {
@@ -198,7 +221,7 @@ fn open_parent(root: &Path, relative_path: &Path) -> Result<(OwnedFd, CString), 
     for component in components {
         current = open_path_dir_at(current.as_raw_fd(), &component)?;
     }
-    let writable_parent = open_readable_parent(current.as_raw_fd())?;
+    let writable_parent = open_readable_parent(current)?;
     Ok((writable_parent, leaf))
 }
 
