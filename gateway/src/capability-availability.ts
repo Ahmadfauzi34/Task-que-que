@@ -3,6 +3,7 @@ import type { CapabilityDescriptor } from "./capabilities";
 import { DEFAULT_WORKER_BROKER } from "./config";
 import { filesystemRootAvailable } from "./filesystem-api";
 import { filesystemMutationAvailable } from "./filesystem-mutation-api";
+import { gitMetadataAvailable } from "./git-api";
 
 interface ProviderAwareDependencies extends GatewayDependencies {
   providerFetchImpl?: FetchLike;
@@ -12,17 +13,20 @@ export interface CapabilityAvailabilitySnapshot {
   providerReachable: boolean;
   filesystemReachable: boolean;
   filesystemMutationReachable: boolean;
+  gitMetadataReachable: boolean;
   activeTaskNames: ReadonlySet<string>;
 }
 
 function unavailableSnapshot(
   filesystemReachable: boolean,
   filesystemMutationReachable: boolean,
+  gitMetadataReachable: boolean,
 ): CapabilityAvailabilitySnapshot {
   return Object.freeze({
     providerReachable: false,
     filesystemReachable,
     filesystemMutationReachable,
+    gitMetadataReachable,
     activeTaskNames: new Set<string>(),
   });
 }
@@ -41,13 +45,18 @@ function safeTaskName(value: unknown): value is string {
 export async function loadCapabilityAvailability(
   dependencies: GatewayDependencies,
 ): Promise<CapabilityAvailabilitySnapshot> {
-  const [filesystemReachable, filesystemMutationReachable] = await Promise.all([
+  const [filesystemReachable, filesystemMutationReachable, gitMetadataReachable] = await Promise.all([
     filesystemRootAvailable(dependencies.config.filesystemRoot),
     filesystemMutationAvailable(dependencies),
+    gitMetadataAvailable(dependencies),
   ]);
   const providerFetchImpl = (dependencies as ProviderAwareDependencies).providerFetchImpl;
   if (!providerFetchImpl) {
-    return unavailableSnapshot(filesystemReachable, filesystemMutationReachable);
+    return unavailableSnapshot(
+      filesystemReachable,
+      filesystemMutationReachable,
+      gitMetadataReachable,
+    );
   }
 
   const origin = dependencies.config.workerBrokerOrigin ?? DEFAULT_WORKER_BROKER;
@@ -61,18 +70,30 @@ export async function loadCapabilityAvailability(
       signal: controller.signal,
     });
     if (response.status !== 200) {
-      return unavailableSnapshot(filesystemReachable, filesystemMutationReachable);
+      return unavailableSnapshot(
+        filesystemReachable,
+        filesystemMutationReachable,
+        gitMetadataReachable,
+      );
     }
 
     const parsed: unknown = await response.json();
     if (!isRecord(parsed) || parsed.schema_version !== 1 || !Array.isArray(parsed.active_task_names)) {
-      return unavailableSnapshot(filesystemReachable, filesystemMutationReachable);
+      return unavailableSnapshot(
+        filesystemReachable,
+        filesystemMutationReachable,
+        gitMetadataReachable,
+      );
     }
 
     const activeTaskNames = new Set<string>();
     for (const value of parsed.active_task_names) {
       if (!safeTaskName(value)) {
-        return unavailableSnapshot(filesystemReachable, filesystemMutationReachable);
+        return unavailableSnapshot(
+          filesystemReachable,
+          filesystemMutationReachable,
+          gitMetadataReachable,
+        );
       }
       activeTaskNames.add(value);
     }
@@ -81,10 +102,15 @@ export async function loadCapabilityAvailability(
       providerReachable: true,
       filesystemReachable,
       filesystemMutationReachable,
+      gitMetadataReachable,
       activeTaskNames,
     });
   } catch {
-    return unavailableSnapshot(filesystemReachable, filesystemMutationReachable);
+    return unavailableSnapshot(
+      filesystemReachable,
+      filesystemMutationReachable,
+      gitMetadataReachable,
+    );
   } finally {
     clearTimeout(timer);
   }
@@ -100,6 +126,10 @@ export function isCapabilityAvailable(
 
   if (descriptor.provider === "rust-fs-mutator") {
     return snapshot.filesystemMutationReachable;
+  }
+
+  if (descriptor.provider === "git-cli-metadata") {
+    return snapshot.gitMetadataReachable;
   }
 
   if (descriptor.kind === "task") {
