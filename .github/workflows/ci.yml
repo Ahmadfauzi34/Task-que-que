@@ -31,6 +31,7 @@ jobs:
           sh -n tests/termux-filesystem-mutation-provider-smoke.sh
           sh -n tests/filesystem-mutation-substrate-smoke.sh
           sh -n tests/termux-git-metadata-provider-smoke.sh
+          sh -n tests/termux-process-substrate-smoke.sh
           sh -n tests/termux-worker-protocol-smoke.sh
           bash -n tests/reference-document-worker-smoke.sh
           sh -n tests/termux-reference-document-worker-smoke.sh
@@ -93,6 +94,11 @@ jobs:
         env:
           TASK_QUEUE_BUN_BIN: bun
         run: sh tests/termux-git-metadata-provider-smoke.sh
+
+      - name: Prove internal registered process substrate
+        env:
+          TASK_QUEUE_BUN_BIN: bun
+        run: sh tests/termux-process-substrate-smoke.sh
 
   gateway-integration:
     name: Bun to Rust Integration
