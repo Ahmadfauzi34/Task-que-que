@@ -143,6 +143,16 @@ jobs:
           TASK_QUEUE_PROCESS_EXEC_BIN="$GITHUB_WORKSPACE/target/debug/robust-sinkhorn-process-exec" \
             sh tests/termux-process-helper-integration-smoke.sh
 
+      - name: Install official MCP 2026-07-28 client for interoperability proof
+        working-directory: gateway
+        run: bun add --no-save @modelcontextprotocol/client@2.0.0
+
+      - name: Prove official MCP client to real gateway and Rust helper
+        working-directory: gateway
+        env:
+          TASK_QUEUE_PROCESS_EXEC_BIN: ${{ github.workspace }}/target/debug/robust-sinkhorn-process-exec
+        run: bun test ./tests/mcp_official_client.integration.ts
+
   worker-integration:
     name: Worker Protocol Integration
     runs-on: ubuntu-latest
