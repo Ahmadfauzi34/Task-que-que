@@ -40,8 +40,8 @@ afterEach(async () => {
 
 async function waitForHealth(origin: string): Promise<void> {
   for (let attempt = 0; attempt < 60; attempt += 1) {
-    if (serverProcess && await serverProcess.exited.then(() => true, () => false)) {
-      throw new Error("gateway exited before becoming healthy");
+    if (serverProcess?.exitCode !== null && serverProcess?.exitCode !== undefined) {
+      throw new Error(`gateway exited before becoming healthy: ${serverProcess.exitCode}`);
     }
 
     try {
