@@ -5,14 +5,15 @@ Task-que-que exposes the MCP endpoint through the same Bun gateway that owns cap
 ## Operator flow
 
 1. Start the Termux reference machine with the Cloudflare tunnel enabled. The lifecycle stores the current HTTPS origin in `$HOME/.task-queue/public-url` and keeps the persistent gateway root token in `$HOME/.task-queue/gateway-token`.
-2. Mint a scoped agent handoff locally on the Android device. For example:
+2. Mint a scoped agent handoff locally on the Android device. A least-privilege discovery-only grant is:
 
    ```sh
    TASK_QUEUE_AGENT_TTL_SECONDS=900 \
      sh ops/termux-mcp-agent-handoff.sh \
-       5 1 process.command.repo.inspect
+       0 0 capability.read
    ```
 
+   Higher depth or authority should only be added when a specific capability requires it.
 3. Give the agent only the emitted `mcp_url` and `authorization` values. Do not give the agent the contents of `gateway-token`.
 
 The handoff command calls `/v1/capability-sessions` only through the local loopback gateway. It emits a signed `tqq1.*` session whose depth, authority, scopes, and expiry are bounded by the requested grant.
