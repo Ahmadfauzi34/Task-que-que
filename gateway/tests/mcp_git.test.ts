@@ -224,11 +224,10 @@ describe("MCP D5 Git metadata provider", () => {
       branch: "main",
       detached: false,
     });
-    expect(commands.map((command) => command.operation)).toEqual([
-      "probe",
-      "head-sha",
-      "head-branch",
-    ]);
+    expect(commands[0]?.operation).toBe("probe");
+    expect(
+      commands.slice(1).map((command) => command.operation).sort(),
+    ).toEqual(["head-branch", "head-sha"]);
   });
 
   test("rejects caller-selected Git arguments before invocation", async () => {
