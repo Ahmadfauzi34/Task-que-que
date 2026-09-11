@@ -94,7 +94,7 @@ They are available only when both `GATEWAY_FILESYSTEM_ROOT` and the server-owned
 
 `filesystem.write` accepts bounded UTF-8 content only in this version. The Rust substrate performs exact relative-path validation, fd-relative traversal, temp-file + same-directory atomic replacement, file/parent durability sync, and symlink-safe mutation. `filesystem.mkdir` uses the same fd-relative root/parent proof and `mkdirat` boundary.
 
-The mutation result model preserves `committed_durability_unknown`. A mutation that committed but whose final durability sync could not be proven is explicitly reported as committed with unknown durability and `retry_safe=false`; callers must not blindly retry it.
+The mutation result model preserves proof state rather than guessing from transport behavior. A Rust `committed_durability_unknown` result is explicitly reported as committed with unknown durability and `retry_safe=false`. A timeout, unrecognized subprocess exit, or other loss of the final mutator proof is reported as `committed="unknown"`, `durability="unknown"`, and `retry_safe=false`, because the subprocess may have crossed the commit point before the gateway lost its result. Only the Rust substrate's explicit pre-commit `mutation_io_error` may be projected as `committed=false`.
 
 Filesystem delete, arbitrary rename, package installation, arbitrary process execution, Git mutation, and general outbound networking are still **not** capabilities. They require separate providers and proof gates.
 
