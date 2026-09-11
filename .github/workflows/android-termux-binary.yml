@@ -47,7 +47,8 @@ jobs:
 
           cargo build --release --locked --target aarch64-linux-android \
             --bin robust-sinkhorn-queue \
-            --bin robust-sinkhorn-worker
+            --bin robust-sinkhorn-worker \
+            --bin robust-sinkhorn-fs-mutator
 
       - name: Validate produced ELFs
         shell: bash
@@ -55,7 +56,8 @@ jobs:
           set -euo pipefail
           for BIN in \
             target/aarch64-linux-android/release/robust-sinkhorn-queue \
-            target/aarch64-linux-android/release/robust-sinkhorn-worker
+            target/aarch64-linux-android/release/robust-sinkhorn-worker \
+            target/aarch64-linux-android/release/robust-sinkhorn-fs-mutator
           do
             test -f "$BIN"
             file "$BIN"
@@ -77,12 +79,16 @@ jobs:
             dist/robust-sinkhorn-queue-aarch64-linux-android
           cp target/aarch64-linux-android/release/robust-sinkhorn-worker \
             dist/robust-sinkhorn-worker-aarch64-linux-android
+          cp target/aarch64-linux-android/release/robust-sinkhorn-fs-mutator \
+            dist/robust-sinkhorn-fs-mutator-aarch64-linux-android
           (
             cd dist
             sha256sum robust-sinkhorn-queue-aarch64-linux-android \
               > robust-sinkhorn-queue-aarch64-linux-android.sha256
             sha256sum robust-sinkhorn-worker-aarch64-linux-android \
               > robust-sinkhorn-worker-aarch64-linux-android.sha256
+            sha256sum robust-sinkhorn-fs-mutator-aarch64-linux-android \
+              > robust-sinkhorn-fs-mutator-aarch64-linux-android.sha256
           )
 
       - name: Upload workflow artifact
@@ -94,6 +100,8 @@ jobs:
             dist/robust-sinkhorn-queue-aarch64-linux-android.sha256
             dist/robust-sinkhorn-worker-aarch64-linux-android
             dist/robust-sinkhorn-worker-aarch64-linux-android.sha256
+            dist/robust-sinkhorn-fs-mutator-aarch64-linux-android
+            dist/robust-sinkhorn-fs-mutator-aarch64-linux-android.sha256
           if-no-files-found: error
           retention-days: 30
 
