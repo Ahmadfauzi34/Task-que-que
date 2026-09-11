@@ -162,7 +162,58 @@ for capability in git.head git.log git.refs; do
     || fail "capability inventory missing $capability"
 done
 
-ALL_RESULTS="$HEAD_JSON$LOG_JSON$REFS_JSON"
+MCP_META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"termux-git-metadata-proof","version":"1.0.0"},"io.modelcontextprotocol/clientCapabilities":{}}'
+
+MCP_LIST="$(curl -fsS -X POST "http://127.0.0.1:$PORT/mcp" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/list' \
+  --data-binary "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{$MCP_META}}")"
+for tool in git.head git.log git.refs; do
+  printf '%s' "$MCP_LIST" | grep -F "\"name\":\"$tool\"" >/dev/null \
+    || fail "MCP did not advertise live authorized $tool"
+done
+
+MCP_DENIED_LIST="$(curl -fsS -X POST "http://127.0.0.1:$PORT/mcp" \
+  -H "Authorization: Bearer $DENIED_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/list' \
+  --data-binary "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{$MCP_META}}")"
+for tool in git.head git.log git.refs; do
+  if printf '%s' "$MCP_DENIED_LIST" | grep -F "\"name\":\"$tool\"" >/dev/null; then
+    fail "MCP advertised $tool without git.inspect scope"
+  fi
+done
+
+MCP_HEAD="$(curl -fsS -X POST "http://127.0.0.1:$PORT/mcp" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: git.head' \
+  --data-binary "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"git.head\",\"arguments\":{},$MCP_META}}")"
+printf '%s' "$MCP_HEAD" | grep -F '"isError":false' >/dev/null \
+  || fail "MCP git.head returned an error"
+printf '%s' "$MCP_HEAD" | grep -F "$SECOND_SHA" >/dev/null \
+  || fail "MCP git.head did not return current HEAD"
+
+MCP_BAD_ARGS="$(curl -fsS -X POST "http://127.0.0.1:$PORT/mcp" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: git.log' \
+  --data-binary "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"git.log\",\"arguments\":{\"ref\":\"HEAD~1\"},$MCP_META}}")"
+printf '%s' "$MCP_BAD_ARGS" | grep -F '"code":-32602' >/dev/null \
+  || fail "MCP accepted caller-selected Git arguments"
+
+ALL_RESULTS="$HEAD_JSON$LOG_JSON$REFS_JSON$MCP_HEAD"
 printf '%s' "$ALL_RESULTS" | grep -F "$REPOSITORY" >/dev/null \
   && fail "absolute repository path leaked through public results"
 printf '%s' "$ALL_RESULTS" | grep -F "$GIT_BIN" >/dev/null \
@@ -186,4 +237,8 @@ printf 'git.refs bounded local refs           : OK\n'
 printf 'caller-selected Git arguments         : REJECTED\n'
 printf 'repository/binary path disclosure     : NOT OBSERVED\n'
 printf 'repository external helper execution  : NOT OBSERVED\n'
+printf 'MCP Git metadata tools                : ADVERTISED WITH git.inspect\n'
+printf 'MCP Git metadata tools no scope       : WITHHELD\n'
+printf 'MCP git.head                          : OK\n'
+printf 'MCP caller-selected Git args          : REJECTED\n'
 printf '\nD5 bounded Git metadata provider: OK\n'
