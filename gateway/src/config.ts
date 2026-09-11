@@ -6,6 +6,7 @@ export interface GatewayConfig {
   queueDaemonOrigin: string;
   workerBrokerOrigin?: string;
   filesystemRoot?: string | null;
+  filesystemMutatorBin?: string | null;
   apiToken: string | null;
   allowUnauthenticated: boolean;
   upstreamTimeoutMs: number;
@@ -79,6 +80,19 @@ function parseFilesystemRoot(raw: string | undefined): string | null {
   return normalized;
 }
 
+function parseFilesystemMutatorBin(raw: string | undefined): string | null {
+  const value = raw?.trim();
+  if (!value) return null;
+  if (value.includes("\0") || value.length > 4_096 || !posix.isAbsolute(value)) {
+    throw new Error("GATEWAY_FILESYSTEM_MUTATOR_BIN must be a bounded absolute POSIX path");
+  }
+  const normalized = posix.normalize(value);
+  if (normalized === "/") {
+    throw new Error("GATEWAY_FILESYSTEM_MUTATOR_BIN must identify a binary, not /");
+  }
+  return normalized;
+}
+
 export function loadGatewayConfig(
   env: Record<string, string | undefined> = process.env,
 ): GatewayConfig {
@@ -136,6 +150,9 @@ export function loadGatewayConfig(
       "WORKER_BROKER_URL",
     ),
     filesystemRoot: parseFilesystemRoot(env.GATEWAY_FILESYSTEM_ROOT),
+    filesystemMutatorBin: parseFilesystemMutatorBin(
+      env.GATEWAY_FILESYSTEM_MUTATOR_BIN,
+    ),
     apiToken,
     allowUnauthenticated,
     upstreamTimeoutMs,
