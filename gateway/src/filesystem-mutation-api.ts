@@ -236,8 +236,16 @@ function mapMutationFailure(error: string | undefined): FilesystemMutationBounda
     case "mutation_process_timeout":
       return new FilesystemMutationBoundaryError(
         504,
-        "filesystem_mutator_timeout",
-        "filesystem mutation provider timed out before a result was proven",
+        "filesystem_mutation_outcome_unknown",
+        "filesystem mutation timed out without a final proof; it may already have committed, so do not retry blindly",
+        { committed: "unknown", durability: "unknown", retry_safe: false },
+      );
+    case "mutation_process_error":
+      return new FilesystemMutationBoundaryError(
+        500,
+        "filesystem_mutation_outcome_unknown",
+        "filesystem mutator exited without a final proof; it may already have committed, so do not retry blindly",
+        { committed: "unknown", durability: "unknown", retry_safe: false },
       );
     case "invalid_path":
       return new FilesystemMutationBoundaryError(400, "invalid_path", "mutation path was rejected by the Rust boundary");
@@ -250,12 +258,19 @@ function mapMutationFailure(error: string | undefined): FilesystemMutationBounda
         "filesystem mutation committed but durability could not be proven; do not retry blindly",
         { committed: true, durability: "unknown", retry_safe: false },
       );
-    default:
+    case "mutation_io_error":
       return new FilesystemMutationBoundaryError(
         500,
         "filesystem_mutation_failed",
-        "filesystem mutation failed before a durable success was proven",
-        { committed: false },
+        "filesystem mutation failed before commit",
+        { committed: false, retry_safe: true },
+      );
+    default:
+      return new FilesystemMutationBoundaryError(
+        500,
+        "filesystem_mutation_outcome_unknown",
+        "filesystem mutation ended without a recognized proof state; do not retry blindly",
+        { committed: "unknown", durability: "unknown", retry_safe: false },
       );
   }
 }
@@ -324,9 +339,9 @@ export async function handleFilesystemMutationRequest(
     return errorResponse(
       new FilesystemMutationBoundaryError(
         500,
-        "filesystem_mutation_failed",
-        "filesystem mutation failed before a durable success was proven",
-        { committed: false },
+        "filesystem_mutation_outcome_unknown",
+        "filesystem mutation failed without a recognized final proof state; do not retry blindly",
+        { committed: "unknown", durability: "unknown", retry_safe: false },
       ),
     );
   }
