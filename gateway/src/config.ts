@@ -7,6 +7,8 @@ export interface GatewayConfig {
   workerBrokerOrigin?: string;
   filesystemRoot?: string | null;
   filesystemMutatorBin?: string | null;
+  gitRepository?: string | null;
+  gitBin?: string | null;
   apiToken: string | null;
   allowUnauthenticated: boolean;
   upstreamTimeoutMs: number;
@@ -66,31 +68,53 @@ function parseLoopbackOrigin(raw: string, name: string): string {
   return url.origin;
 }
 
-function parseFilesystemRoot(raw: string | undefined): string | null {
+function parseAbsoluteProviderPath(
+  raw: string | undefined,
+  name: string,
+  rootError: string,
+): string | null {
   const value = raw?.trim();
   if (!value) return null;
   if (value.includes("\0") || value.length > 4_096 || !posix.isAbsolute(value)) {
-    throw new Error("GATEWAY_FILESYSTEM_ROOT must be a bounded absolute POSIX path");
+    throw new Error(`${name} must be a bounded absolute POSIX path`);
   }
-
   const normalized = posix.normalize(value);
   if (normalized === "/") {
-    throw new Error("GATEWAY_FILESYSTEM_ROOT must not delegate the filesystem root /");
+    throw new Error(rootError);
   }
   return normalized;
 }
 
+function parseFilesystemRoot(raw: string | undefined): string | null {
+  return parseAbsoluteProviderPath(
+    raw,
+    "GATEWAY_FILESYSTEM_ROOT",
+    "GATEWAY_FILESYSTEM_ROOT must not delegate the filesystem root /",
+  );
+}
+
 function parseFilesystemMutatorBin(raw: string | undefined): string | null {
-  const value = raw?.trim();
-  if (!value) return null;
-  if (value.includes("\0") || value.length > 4_096 || !posix.isAbsolute(value)) {
-    throw new Error("GATEWAY_FILESYSTEM_MUTATOR_BIN must be a bounded absolute POSIX path");
-  }
-  const normalized = posix.normalize(value);
-  if (normalized === "/") {
-    throw new Error("GATEWAY_FILESYSTEM_MUTATOR_BIN must identify a binary, not /");
-  }
-  return normalized;
+  return parseAbsoluteProviderPath(
+    raw,
+    "GATEWAY_FILESYSTEM_MUTATOR_BIN",
+    "GATEWAY_FILESYSTEM_MUTATOR_BIN must identify a binary, not /",
+  );
+}
+
+function parseGitRepository(raw: string | undefined): string | null {
+  return parseAbsoluteProviderPath(
+    raw,
+    "GATEWAY_GIT_REPOSITORY",
+    "GATEWAY_GIT_REPOSITORY must not delegate the filesystem root /",
+  );
+}
+
+function parseGitBin(raw: string | undefined): string | null {
+  return parseAbsoluteProviderPath(
+    raw,
+    "GATEWAY_GIT_BIN",
+    "GATEWAY_GIT_BIN must identify a binary, not /",
+  );
 }
 
 export function loadGatewayConfig(
@@ -153,6 +177,8 @@ export function loadGatewayConfig(
     filesystemMutatorBin: parseFilesystemMutatorBin(
       env.GATEWAY_FILESYSTEM_MUTATOR_BIN,
     ),
+    gitRepository: parseGitRepository(env.GATEWAY_GIT_REPOSITORY),
+    gitBin: parseGitBin(env.GATEWAY_GIT_BIN),
     apiToken,
     allowUnauthenticated,
     upstreamTimeoutMs,
