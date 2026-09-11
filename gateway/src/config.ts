@@ -10,6 +10,7 @@ export interface GatewayConfig {
   gitRepository?: string | null;
   gitBin?: string | null;
   processRegistryFile?: string | null;
+  processExecBin?: string | null;
   apiToken: string | null;
   allowUnauthenticated: boolean;
   upstreamTimeoutMs: number;
@@ -126,6 +127,14 @@ function parseProcessRegistryFile(raw: string | undefined): string | null {
   );
 }
 
+function parseProcessExecBin(raw: string | undefined): string | null {
+  return parseAbsoluteProviderPath(
+    raw,
+    "GATEWAY_PROCESS_EXEC_BIN",
+    "GATEWAY_PROCESS_EXEC_BIN must identify a binary, not /",
+  );
+}
+
 function pathIsSameOrWithin(root: string, candidate: string): boolean {
   const relative = posix.relative(root, candidate);
   return relative === ""
@@ -138,6 +147,7 @@ function validateProviderIsolation(
   gitRepository: string | null,
   gitBin: string | null,
   processRegistryFile: string | null,
+  processExecBin: string | null,
 ): void {
   if (!filesystemRoot || !filesystemMutatorBin) return;
 
@@ -159,6 +169,11 @@ function validateProviderIsolation(
   if (processRegistryFile && pathIsSameOrWithin(filesystemRoot, processRegistryFile)) {
     throw new Error(
       "GATEWAY_PROCESS_REGISTRY_FILE must be outside the delegated writable filesystem root",
+    );
+  }
+  if (processExecBin && pathIsSameOrWithin(filesystemRoot, processExecBin)) {
+    throw new Error(
+      "GATEWAY_PROCESS_EXEC_BIN must be outside the delegated writable filesystem root",
     );
   }
 }
@@ -217,6 +232,7 @@ export function loadGatewayConfig(
   const processRegistryFile = parseProcessRegistryFile(
     env.GATEWAY_PROCESS_REGISTRY_FILE,
   );
+  const processExecBin = parseProcessExecBin(env.GATEWAY_PROCESS_EXEC_BIN);
 
   validateProviderIsolation(
     filesystemRoot,
@@ -224,6 +240,7 @@ export function loadGatewayConfig(
     gitRepository,
     gitBin,
     processRegistryFile,
+    processExecBin,
   );
 
   return {
@@ -242,6 +259,7 @@ export function loadGatewayConfig(
     gitRepository,
     gitBin,
     processRegistryFile,
+    processExecBin,
     apiToken,
     allowUnauthenticated,
     upstreamTimeoutMs,
