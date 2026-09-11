@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -88,6 +88,60 @@ describe("registered process substrate", () => {
     await expect(loadRegisteredProcessRegistry(badRegistry)).rejects.toThrow(
       "binary must be a regular file",
     );
+  });
+
+  test("keeps registry, executable and cwd outside a writable delegated root", async () => {
+    const { base, cwd, binary, descriptor } = await fixture();
+    const writableRoot = join(base, "workspace");
+    await mkdir(writableRoot);
+
+    const registryInside = join(writableRoot, "registry.json");
+    await writeFile(
+      registryInside,
+      `${JSON.stringify({ version: 1, commands: [descriptor] })}\n`,
+      "utf8",
+    );
+    await expect(
+      loadRegisteredProcessRegistry(registryInside, writableRoot),
+    ).rejects.toThrow("registry must be outside the writable filesystem root");
+
+    const binaryInside = join(writableRoot, "registered-tool");
+    await writeFile(binaryInside, "#!/bin/sh\nexit 0\n", "utf8");
+    await chmod(binaryInside, 0o700);
+    const binaryRegistry = join(base, "binary-inside.json");
+    await writeFile(
+      binaryRegistry,
+      `${JSON.stringify({
+        version: 1,
+        commands: [{ ...descriptor, binary: binaryInside }],
+      })}\n`,
+      "utf8",
+    );
+    await expect(
+      loadRegisteredProcessRegistry(binaryRegistry, writableRoot),
+    ).rejects.toThrow("binary must be outside the writable filesystem root");
+
+    const cwdRegistry = join(base, "cwd-inside.json");
+    await writeFile(
+      cwdRegistry,
+      `${JSON.stringify({
+        version: 1,
+        commands: [{ ...descriptor, binary, cwd: writableRoot }],
+      })}\n`,
+      "utf8",
+    );
+    await expect(
+      loadRegisteredProcessRegistry(cwdRegistry, writableRoot),
+    ).rejects.toThrow("cwd must be outside the writable filesystem root");
+
+    const safeRegistry = join(base, "safe.json");
+    await writeFile(
+      safeRegistry,
+      `${JSON.stringify({ version: 1, commands: [descriptor] })}\n`,
+      "utf8",
+    );
+    expect((await loadRegisteredProcessRegistry(safeRegistry, writableRoot)).commands.size).toBe(1);
+    expect(cwd).toBe(base);
   });
 
   test("runs only fixed registered argv in a scrubbed minimal environment", async () => {
