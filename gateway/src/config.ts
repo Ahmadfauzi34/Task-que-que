@@ -9,6 +9,7 @@ export interface GatewayConfig {
   filesystemMutatorBin?: string | null;
   gitRepository?: string | null;
   gitBin?: string | null;
+  processRegistryFile?: string | null;
   apiToken: string | null;
   allowUnauthenticated: boolean;
   upstreamTimeoutMs: number;
@@ -117,6 +118,14 @@ function parseGitBin(raw: string | undefined): string | null {
   );
 }
 
+function parseProcessRegistryFile(raw: string | undefined): string | null {
+  return parseAbsoluteProviderPath(
+    raw,
+    "GATEWAY_PROCESS_REGISTRY_FILE",
+    "GATEWAY_PROCESS_REGISTRY_FILE must identify a registry file, not /",
+  );
+}
+
 function pathIsSameOrWithin(root: string, candidate: string): boolean {
   const relative = posix.relative(root, candidate);
   return relative === ""
@@ -128,6 +137,7 @@ function validateProviderIsolation(
   filesystemMutatorBin: string | null,
   gitRepository: string | null,
   gitBin: string | null,
+  processRegistryFile: string | null,
 ): void {
   if (!filesystemRoot || !filesystemMutatorBin) return;
 
@@ -144,6 +154,11 @@ function validateProviderIsolation(
   if (gitBin && pathIsSameOrWithin(filesystemRoot, gitBin)) {
     throw new Error(
       "GATEWAY_GIT_BIN must be outside the delegated writable filesystem root",
+    );
+  }
+  if (processRegistryFile && pathIsSameOrWithin(filesystemRoot, processRegistryFile)) {
+    throw new Error(
+      "GATEWAY_PROCESS_REGISTRY_FILE must be outside the delegated writable filesystem root",
     );
   }
 }
@@ -199,12 +214,16 @@ export function loadGatewayConfig(
   );
   const gitRepository = parseGitRepository(env.GATEWAY_GIT_REPOSITORY);
   const gitBin = parseGitBin(env.GATEWAY_GIT_BIN);
+  const processRegistryFile = parseProcessRegistryFile(
+    env.GATEWAY_PROCESS_REGISTRY_FILE,
+  );
 
   validateProviderIsolation(
     filesystemRoot,
     filesystemMutatorBin,
     gitRepository,
     gitBin,
+    processRegistryFile,
   );
 
   return {
@@ -222,6 +241,7 @@ export function loadGatewayConfig(
     filesystemMutatorBin,
     gitRepository,
     gitBin,
+    processRegistryFile,
     apiToken,
     allowUnauthenticated,
     upstreamTimeoutMs,
