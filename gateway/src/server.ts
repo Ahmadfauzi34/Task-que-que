@@ -1,7 +1,11 @@
 import { TokenBucketAdmissionController } from "./admission";
 import { MAX_PUBLIC_REQUEST_BYTES } from "./app";
 import { loadGatewayConfig } from "./config";
-import { handleMcpRequest, MCP_ENDPOINT, MCP_PROTOCOL_VERSION } from "./mcp";
+import {
+  handleMcpRequestWithRegisteredProcesses,
+  MCP_ENDPOINT,
+  MCP_PROTOCOL_VERSION,
+} from "./mcp-process";
 import { TASK_REGISTRY } from "./registry";
 import { routeGatewayRequest } from "./router";
 
@@ -23,7 +27,7 @@ const server = Bun.serve({
   maxRequestBodySize: MAX_PUBLIC_REQUEST_BYTES,
   idleTimeout: 10,
   async fetch(request) {
-    const mcpResponse = await handleMcpRequest(
+    const mcpResponse = await handleMcpRequestWithRegisteredProcesses(
       request,
       dependencies,
       (inner) => routeGatewayRequest(inner, dependencies),
@@ -51,6 +55,7 @@ console.log(`tasks  : ${Object.keys(TASK_REGISTRY).join(", ") || "none"}`);
 console.log(`enqueue: ${config.enqueueRatePerSecond}/s, burst ${config.enqueueBurst}`);
 console.log(`mcp    : ${MCP_ENDPOINT} (${MCP_PROTOCOL_VERSION})`);
 console.log(`filesystem: ${config.filesystemRoot ? "scoped read-only provider configured" : "disabled"}`);
+console.log(`process: ${config.processRegistryFile && config.processExecBin ? "registered fixed operations configured" : "disabled"}`);
 console.log("capability api: /v1/capabilities");
 console.log("capability sessions: /v1/capability-sessions");
 console.log("workflow api: /v1/workflows");
