@@ -1,6 +1,6 @@
 # Registered process provider contract
 
-The registered process provider is a D5 delegated-system provider for **operator-registered fixed operations**. It does **not** expose a general process launcher, a shell, caller-selected executable paths, caller-selected argv, caller-selected environment, or caller-selected cwd. MCP exposure remains absent in PR #50.
+The registered process provider is a D5 delegated-system provider for **operator-registered fixed operations**. It does **not** expose a general process launcher, a shell, caller-selected executable paths, caller-selected argv, caller-selected environment, or caller-selected cwd.
 
 ## Registry schema
 
@@ -76,8 +76,6 @@ The Rust helper binds executable and cwd identity by file descriptor. Bun launch
 
 ## Fixed HTTP projection
 
-PR #50 adds an agent-facing HTTP projection for commands that already exist in the operator registry. It does not create a generic execution endpoint.
-
 For a registry command named `example.inspect`, the projected capability and route are fixed:
 
 ```text
@@ -91,6 +89,36 @@ The gateway derives the executable, fixed argv, cwd, timeout, output ceiling, au
 `system.capabilities` builds ephemeral process capability descriptors from the live validated registry. The static `CAPABILITY_REGISTRY` is not modified, so the operator registry remains the single source of truth. A process capability is runtime-available only while both the registry and the configured native Rust helper validate.
 
 The public capability projection contains the capability name, D5/A1-or-A3 requirement, exact scope, mutation/cancellation flags, and fixed route. It does not disclose the executable path, registry argv, or cwd.
+
+## MCP projection
+
+The MCP layer projects the same live registry-derived descriptors. It does not introduce a second process registry or execution path.
+
+```text
+MCP tools/list
+      ↓
+live registry v2 descriptors
+      ↓
+signed grant check
+      ↓
+process.command.<registered-name>
+
+MCP tools/call with {}
+      ↓
+POST /v1/process/<registered-name>
+      ↓
+normal gateway router
+      ↓
+registry v2 authority + exact scope
+      ↓
+Rust fd-bound helper
+```
+
+Each process MCP tool advertises an empty object input schema (`additionalProperties=false`). Caller-selected executable, argv, environment, cwd, query parameters, request bodies, and shell text are not part of the MCP contract.
+
+The existing MCP core still validates protocol version, mirrored method/name headers, origin, request size, JSON-RPC shape, and bearer authentication before the process projection can run. The process adapter only handles a command after the core MCP path has rejected it as unknown from the static registry and the live process registry proves the command exists and the signed grant covers it.
+
+`tools/call` then re-enters the fixed HTTP route with the same bearer token. The HTTP process route remains authoritative and performs the capability check again before the Rust helper can execute.
 
 ## Security invariants
 
@@ -110,11 +138,23 @@ The provider currently enforces these invariants:
 - an A1 grant cannot execute an A3 mutating command
 - public fixed-operation routes reject query parameters and request bodies before execution
 - dynamic discovery does not disclose executable, argv, or cwd
+- MCP process tools accept only an empty argument object
+- MCP process calls re-enter the fixed HTTP route instead of invoking the Rust helper directly
 - timeout, cancellation, and output overflow kill the process group
-- MCP process tools remain absent
+- malformed gateway result JSON is projected as an MCP tool error
 
-## MCP gate
+## Proof gate
 
-PR #50 deliberately stops at fixed HTTP projection plus `system.capabilities` discovery. MCP exposure requires a separate review and proof gate. Until then, MCP `tools/list` and `tools/call` do not project registered process commands.
+MCP unit/transport tests are not sufficient for promotion by themselves. Before merge, the exact PR head must also be audited through a real temporary gateway process and the exact-head Android/Termux helper artifact so that the full path is observed on the target environment:
 
-Any future MCP layer must consume the same live registry-derived descriptors and must not introduce a second authorization registry or any caller-controlled executable, argv, environment, cwd, or shell text.
+```text
+MCP client request
+  -> live Bun server
+  -> MCP adapter
+  -> fixed HTTP route
+  -> registry v2 grant check
+  -> Rust fd-bound helper
+  -> bounded result / process-group fence
+```
+
+No future extension should add arbitrary process passthrough, caller-selected executable paths, argv, environment variables, cwd values, or shell source text.
