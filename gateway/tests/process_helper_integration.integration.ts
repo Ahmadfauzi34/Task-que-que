@@ -19,16 +19,6 @@ afterEach(async () => {
   }
 });
 
-function requiredExecutable(name: string): string {
-  const resolved = Bun.which(name);
-  if (!resolved) throw new Error(`${name} executable is required for process integration proof`);
-  return resolved;
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
 async function writeRegistry(
   base: string,
   descriptors: RegisteredProcessDescriptor[],
@@ -105,14 +95,11 @@ describe("registered process Rust helper integration", () => {
 
   test("kills the whole registered process group on timeout", async () => {
     const { base, cwd, helper } = await fixtureBase();
-    const shell = await realpath(requiredExecutable("sh"));
-    const sleep = await realpath(requiredExecutable("sleep"));
     const pidFile = join(base, "timeout-child.pid");
-    const command = `${shellQuote(sleep)} 60 & child=$!; echo $child > ${shellQuote(pidFile)}; wait`;
     const registryPath = await writeRegistry(base, [{
       name: "proof.timeout-tree",
-      binary: shell,
-      args: ["-c", command],
+      binary: helper,
+      args: ["--self-proof-tree", pidFile],
       cwd,
       timeout_ms: 250,
       max_output_bytes: 4 * 1024,
@@ -130,14 +117,11 @@ describe("registered process Rust helper integration", () => {
 
   test("kills the whole registered process group on cancellation", async () => {
     const { base, cwd, helper } = await fixtureBase();
-    const shell = await realpath(requiredExecutable("sh"));
-    const sleep = await realpath(requiredExecutable("sleep"));
     const pidFile = join(base, "cancel-child.pid");
-    const command = `${shellQuote(sleep)} 60 & child=$!; echo $child > ${shellQuote(pidFile)}; wait`;
     const registryPath = await writeRegistry(base, [{
       name: "proof.cancel-tree",
-      binary: shell,
-      args: ["-c", command],
+      binary: helper,
+      args: ["--self-proof-tree", pidFile],
       cwd,
       timeout_ms: 5_000,
       max_output_bytes: 4 * 1024,
