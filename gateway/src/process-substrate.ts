@@ -4,6 +4,14 @@ import { constants as fsConstants } from "node:fs";
 import { access, lstat, open, realpath } from "node:fs/promises";
 import { posix } from "node:path";
 
+import {
+  CAPABILITY_AUTHORITY,
+  CAPABILITY_DEPTH,
+  evaluateCapabilityGrant,
+  type CapabilityAuthority,
+  type CapabilityGrant,
+} from "./capabilities";
+
 const MAX_REGISTRY_BYTES = 64 * 1024;
 const MAX_COMMANDS = 64;
 const MAX_ARGUMENTS = 16;
@@ -12,7 +20,10 @@ const MAX_OUTPUT_BYTES_LIMIT = 256 * 1024;
 const MIN_TIMEOUT_MS = 100;
 const MAX_TIMEOUT_MS = 30_000;
 const COMMAND_NAME = /^[a-z][a-z0-9._-]{0,63}$/;
+const PROCESS_SCOPE = /^process\.command\.[a-z][a-z0-9._-]{0,63}$/;
 const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
+
+export type RegisteredProcessAuthority = "invoke" | "mutate_scoped";
 
 export interface RegisteredProcessDescriptor {
   name: string;
@@ -21,16 +32,20 @@ export interface RegisteredProcessDescriptor {
   cwd: string;
   timeout_ms: number;
   max_output_bytes: number;
+  authority: RegisteredProcessAuthority;
+  required_scope: string;
+  mutates_state: boolean;
 }
 
 export interface RegisteredProcessRegistry {
-  version: 1;
+  version: 2;
   commands: Map<string, RegisteredProcessDescriptor>;
   source: string;
 }
 
 export interface RegisteredProcessExecutionOptions {
   helperBin: string;
+  grant: CapabilityGrant;
   signal?: AbortSignal;
 }
 
@@ -41,6 +56,7 @@ export interface RegisteredProcessResult {
   stderr?: string;
   error?:
     | "unregistered_process"
+    | "process_unauthorized"
     | "process_unavailable"
     | "process_timeout"
     | "process_cancelled"
@@ -105,6 +121,45 @@ async function validateCanonicalDirectory(path: string): Promise<void> {
   }
 }
 
+function authorityLevel(authority: RegisteredProcessAuthority): CapabilityAuthority {
+  return authority === "invoke"
+    ? CAPABILITY_AUTHORITY.INVOKE
+    : CAPABILITY_AUTHORITY.MUTATE_SCOPED;
+}
+
+function validateProcessPolicy(
+  name: string,
+  authority: unknown,
+  requiredScope: unknown,
+  mutatesState: unknown,
+): Pick<RegisteredProcessDescriptor, "authority" | "required_scope" | "mutates_state"> {
+  if (authority !== "invoke" && authority !== "mutate_scoped") {
+    throw new Error("registered process authority must be invoke or mutate_scoped");
+  }
+  if (typeof mutatesState !== "boolean") {
+    throw new Error("registered process mutates_state must be boolean");
+  }
+  if (
+    (authority === "invoke" && mutatesState)
+    || (authority === "mutate_scoped" && !mutatesState)
+  ) {
+    throw new Error("registered process authority and mutates_state are inconsistent");
+  }
+  const expectedScope = `process.command.${name}`;
+  if (
+    typeof requiredScope !== "string"
+    || !PROCESS_SCOPE.test(requiredScope)
+    || requiredScope !== expectedScope
+  ) {
+    throw new Error(`registered process required_scope must be exactly ${expectedScope}`);
+  }
+  return {
+    authority,
+    required_scope: requiredScope,
+    mutates_state: mutatesState,
+  };
+}
+
 function parseDescriptor(value: unknown): RegisteredProcessDescriptor {
   if (!isRecord(value) || !hasExactKeys(value, [
     "name",
@@ -113,6 +168,9 @@ function parseDescriptor(value: unknown): RegisteredProcessDescriptor {
     "cwd",
     "timeout_ms",
     "max_output_bytes",
+    "authority",
+    "required_scope",
+    "mutates_state",
   ])) {
     throw new Error("registered process descriptor has an invalid schema");
   }
@@ -149,6 +207,13 @@ function parseDescriptor(value: unknown): RegisteredProcessDescriptor {
     throw new Error("registered process max_output_bytes is outside the bounded range");
   }
 
+  const policy = validateProcessPolicy(
+    value.name,
+    value.authority,
+    value.required_scope,
+    value.mutates_state,
+  );
+
   return {
     name: value.name,
     binary: validateAbsolutePath(value.binary, "registered process binary"),
@@ -156,6 +221,7 @@ function parseDescriptor(value: unknown): RegisteredProcessDescriptor {
     cwd: validateAbsolutePath(value.cwd, "registered process cwd"),
     timeout_ms: value.timeout_ms as number,
     max_output_bytes: value.max_output_bytes as number,
+    ...policy,
   };
 }
 
@@ -197,7 +263,7 @@ export async function loadRegisteredProcessRegistry(
     if (
       !isRecord(parsed)
       || !hasExactKeys(parsed, ["version", "commands"])
-      || parsed.version !== 1
+      || parsed.version !== 2
       || !Array.isArray(parsed.commands)
       || parsed.commands.length === 0
       || parsed.commands.length > MAX_COMMANDS
@@ -222,10 +288,29 @@ export async function loadRegisteredProcessRegistry(
       commands.set(descriptor.name, descriptor);
     }
 
-    return { version: 1, commands, source: registryPath };
+    return { version: 2, commands, source: registryPath };
   } finally {
     await handle.close();
   }
+}
+
+export function evaluateRegisteredProcessGrant(
+  descriptor: RegisteredProcessDescriptor,
+  grant: CapabilityGrant,
+) {
+  return evaluateCapabilityGrant(grant, {
+    name: `process:${descriptor.name}`,
+    kind: "surface",
+    provider: "rust-process-exec",
+    description: "Internal registered process authorization requirement.",
+    minDepth: CAPABILITY_DEPTH.DELEGATED_SYSTEM,
+    minAuthority: authorityLevel(descriptor.authority),
+    requiredScopes: [descriptor.required_scope],
+    publiclyDiscoverable: false,
+    mutatesState: descriptor.mutates_state,
+    cancellable: true,
+    durable: false,
+  });
 }
 
 function minimalProcessEnvironment(): NodeJS.ProcessEnv {
@@ -262,6 +347,9 @@ export async function runRegisteredProcess(
 ): Promise<RegisteredProcessResult> {
   const descriptor = registry.commands.get(name);
   if (!descriptor) return { ok: false, error: "unregistered_process" };
+  if (!evaluateRegisteredProcessGrant(descriptor, options.grant).allowed) {
+    return { ok: false, error: "process_unauthorized" };
+  }
   if (options.signal?.aborted) return { ok: false, error: "process_cancelled" };
 
   let helperBin: string;
