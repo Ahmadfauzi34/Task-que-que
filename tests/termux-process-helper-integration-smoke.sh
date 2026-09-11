@@ -26,8 +26,25 @@ esac
 }
 
 cd "$ROOT_DIR/gateway"
+TEST_LOG="$(mktemp "${TMPDIR:-/tmp}/tqq-process-helper-test.XXXXXX")"
+cleanup() {
+  rm -f "$TEST_LOG"
+}
+trap cleanup EXIT INT TERM
+
+set +e
 TASK_QUEUE_PROCESS_EXEC_BIN="$HELPER_BIN" \
-  "$BUN_BIN" test ./tests/process_helper_integration.integration.ts
+  "$BUN_BIN" test ./tests/process_helper_integration.integration.ts \
+  >"$TEST_LOG" 2>&1
+TEST_STATUS=$?
+set -e
+
+cat "$TEST_LOG"
+
+if [ "$TEST_STATUS" -ne 0 ] || ! grep -Eq '(^|[[:space:]])0 fail([[:space:]]|$)' "$TEST_LOG"; then
+  printf 'process helper integration smoke failed: Bun integration proof did not report zero failures\n' >&2
+  exit 1
+fi
 
 printf 'Registered process fd-bound integration proof state\n'
 printf 'registry -> Rust helper                  : OK\n'
