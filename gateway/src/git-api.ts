@@ -10,6 +10,7 @@ const MAX_GIT_OUTPUT_BYTES = 256 * 1024;
 const MAX_LOG_COMMITS = 32;
 const MAX_REFS = 128;
 const HASH = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 export type GitMetadataOperation =
   | "probe"
@@ -80,6 +81,7 @@ function safeGitEnvironment(): NodeJS.ProcessEnv {
   env.GIT_PAGER = "cat";
   env.GIT_OPTIONAL_LOCKS = "0";
   env.GIT_NO_REPLACE_OBJECTS = "1";
+  env.GIT_NO_LAZY_FETCH = "1";
   env.PAGER = "cat";
   env.LC_ALL = "C";
   env.LANG = "C";
@@ -124,6 +126,10 @@ export const defaultGitMetadataRunner: GitMetadataRunner = async (
     "core.fsmonitor=false",
     "-c",
     "core.untrackedCache=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.alternateRefsCommand=:",
     "-c",
     "color.ui=false",
     "-c",
@@ -182,10 +188,15 @@ export const defaultGitMetadataRunner: GitMetadataRunner = async (
       finish({ ok: false, error: "git_command_failed" });
       return;
     }
-    finish({
-      ok: true,
-      stdout: Buffer.concat(stdout, stdoutBytes).toString("utf8"),
-    });
+    try {
+      const bytes = Buffer.concat(stdout, stdoutBytes);
+      finish({
+        ok: true,
+        stdout: utf8Decoder.decode(bytes),
+      });
+    } catch {
+      finish({ ok: false, error: "git_invalid_output" });
+    }
   });
 
   timer = setTimeout(() => {
@@ -283,6 +294,8 @@ function mapGitFailure(result: GitMetadataResult): Response {
       return errorResponse(504, "git_provider_timeout", "Git metadata provider timed out");
     case "git_output_too_large":
       return errorResponse(502, "git_output_too_large", "Git metadata output exceeded the bounded provider limit");
+    case "git_invalid_output":
+      return errorResponse(502, "invalid_git_response", "Git metadata provider returned non-UTF-8 output");
     default:
       return errorResponse(502, "git_command_failed", "Git metadata provider could not produce a valid result");
   }
@@ -302,13 +315,15 @@ function parseLog(stdout: string): Record<string, unknown>[] | null {
     if (fields.length !== 3) return null;
     const [id, unixTimeText, parentsText] = fields;
     if (!id || !HASH.test(id) || !/^[0-9]+$/.test(unixTimeText ?? "")) return null;
+    const unixTime = Number(unixTimeText);
+    if (!Number.isSafeInteger(unixTime)) return null;
     const parents = parentsText === ""
       ? []
       : (parentsText ?? "").split(" ");
     if (parents.some((parent) => !HASH.test(parent))) return null;
     commits.push({
       id,
-      unix_time: Number(unixTimeText),
+      unix_time: unixTime,
       parents,
     });
   }
@@ -344,18 +359,37 @@ async function handleHead(dependencies: GatewayDependencies): Promise<Response> 
     invokeGit(dependencies, "head-branch"),
   ]);
 
-  const head = shaResult.ok && shaResult.stdout !== undefined
-    ? parseHash(shaResult.stdout)
-    : null;
-  const branch = branchResult.ok && branchResult.stdout !== undefined
-    ? branchResult.stdout.trim()
-    : null;
-
-  if (head === null && branch === null) {
-    return mapGitFailure(shaResult.error === "git_command_failed" ? branchResult : shaResult);
+  if (!shaResult.ok && shaResult.error !== "git_command_failed") {
+    return mapGitFailure(shaResult);
   }
-  if (branch !== null && (branch.length === 0 || branch.length > 1_024 || /[\r\n\0]/.test(branch))) {
-    return errorResponse(502, "invalid_git_response", "Git metadata provider returned an invalid branch name");
+  if (!branchResult.ok && branchResult.error !== "git_command_failed") {
+    return mapGitFailure(branchResult);
+  }
+
+  let head: string | null = null;
+  if (shaResult.ok) {
+    if (shaResult.stdout === undefined) {
+      return errorResponse(502, "invalid_git_response", "Git metadata provider returned no HEAD output");
+    }
+    head = parseHash(shaResult.stdout);
+    if (head === null) {
+      return errorResponse(502, "invalid_git_response", "Git metadata provider returned an invalid HEAD hash");
+    }
+  }
+
+  let branch: string | null = null;
+  if (branchResult.ok) {
+    if (branchResult.stdout === undefined) {
+      return errorResponse(502, "invalid_git_response", "Git metadata provider returned no branch output");
+    }
+    branch = branchResult.stdout.trim();
+    if (branch.length === 0 || branch.length > 1_024 || /[\r\n\0]/.test(branch)) {
+      return errorResponse(502, "invalid_git_response", "Git metadata provider returned an invalid branch name");
+    }
+  }
+
+  if (!shaResult.ok && !branchResult.ok) {
+    return mapGitFailure(shaResult);
   }
 
   return jsonResponse({
