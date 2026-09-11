@@ -113,8 +113,9 @@ jobs:
       - name: Prove Rust-backed D5 filesystem mutation facade
         env:
           TASK_QUEUE_BUN_BIN: bun
-          TASK_QUEUE_FS_MUTATOR_BIN: target/debug/robust-sinkhorn-fs-mutator
-        run: sh tests/termux-filesystem-mutation-provider-smoke.sh
+        run: |
+          TASK_QUEUE_FS_MUTATOR_BIN="$GITHUB_WORKSPACE/target/debug/robust-sinkhorn-fs-mutator" \
+            sh tests/termux-filesystem-mutation-provider-smoke.sh
 
   worker-integration:
     name: Worker Protocol Integration
