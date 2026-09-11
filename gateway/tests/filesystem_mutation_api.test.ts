@@ -157,6 +157,30 @@ describe("D5 Rust-backed filesystem mutation facade", () => {
     expect(calls).toBe(0);
   });
 
+  test("denies mutation before the runner when the exact mutation scope is missing", async () => {
+    let calls = 0;
+    const runner: FilesystemMutationRunner = async () => {
+      calls += 1;
+      return { ok: true };
+    };
+    const issued = await session(
+      CAPABILITY_AUTHORITY.MUTATE_SCOPED,
+      ["filesystem.mkdir"],
+    );
+
+    const response = await routeGatewayRequest(
+      request(
+        "/v1/filesystem/write",
+        issued.token,
+        { path: "proof.txt", content: "blocked" },
+      ),
+      dependencies(runner),
+    );
+    expect(response.status).toBe(403);
+    expect(await response.text()).toContain("filesystem.write denied by scope");
+    expect(calls).toBe(0);
+  });
+
   test("rejects normalized-away mutation paths before invoking Rust", async () => {
     let calls = 0;
     const runner: FilesystemMutationRunner = async () => {
