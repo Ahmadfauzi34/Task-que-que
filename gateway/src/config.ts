@@ -121,11 +121,7 @@ function parseAuthorizationServerIssuer(
     );
   }
 
-  return url.href.endsWith("/") && url.pathname !== "/"
-    ? url.href.slice(0, -1)
-    : url.href === `${url.origin}/`
-      ? url.origin
-      : url.href;
+  return value;
 }
 
 function parseAbsoluteProviderPath(
