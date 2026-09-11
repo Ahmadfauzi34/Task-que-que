@@ -7,15 +7,15 @@ const BASE = {
 };
 
 describe("OAuth resource discovery configuration", () => {
-  test("accepts a stable public HTTPS origin and HTTPS authorization-server issuer", () => {
+  test("accepts a stable public HTTPS origin and preserves the exact HTTPS issuer identifier", () => {
     const config = loadGatewayConfig({
       ...BASE,
       GATEWAY_PUBLIC_ORIGIN: "https://mcp.example.com",
-      GATEWAY_OAUTH_AUTHORIZATION_SERVER: "https://auth.example.com/tenant",
+      GATEWAY_OAUTH_AUTHORIZATION_SERVER: "https://auth.example.com/tenant/",
     });
 
     expect(config.publicOrigin).toBe("https://mcp.example.com");
-    expect(config.oauthAuthorizationServer).toBe("https://auth.example.com/tenant");
+    expect(config.oauthAuthorizationServer).toBe("https://auth.example.com/tenant/");
   });
 
   test("rejects non-HTTPS or non-origin public URLs", () => {
