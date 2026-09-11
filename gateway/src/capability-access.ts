@@ -35,6 +35,8 @@ function requiredSurface(path: string, method: string): string | null {
   if (path === "/v1/filesystem/list" && method === "POST") return "filesystem.list";
   if (path === "/v1/filesystem/stat" && method === "POST") return "filesystem.stat";
   if (path === "/v1/filesystem/read" && method === "POST") return "filesystem.read";
+  if (path === "/v1/filesystem/write" && method === "POST") return "filesystem.write";
+  if (path === "/v1/filesystem/mkdir" && method === "POST") return "filesystem.mkdir";
   return null;
 }
 
