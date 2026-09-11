@@ -15,8 +15,22 @@ mod sys {
     pub const O_WRONLY: c_int = 0o1;
     pub const O_CREAT: c_int = 0o100;
     pub const O_EXCL: c_int = 0o200;
+
+    // Linux x86/x86_64 and Android ARM64 do not encode every O_* flag with
+    // the same bit values. The previous Linux values for O_DIRECTORY and
+    // O_NOFOLLOW were observed by strace on physical Android ARM64 as
+    // O_DIRECT and O_LARGEFILE, causing valid parent reopens to fail with
+    // EINVAL. Keep the ABI-sensitive flags target-aware instead of assuming
+    // Linux host constants are portable to bionic/ARM64.
+    #[cfg(target_os = "linux")]
     pub const O_DIRECTORY: c_int = 0o200000;
+    #[cfg(target_os = "linux")]
     pub const O_NOFOLLOW: c_int = 0o400000;
+    #[cfg(target_os = "android")]
+    pub const O_DIRECTORY: c_int = 0o40000;
+    #[cfg(target_os = "android")]
+    pub const O_NOFOLLOW: c_int = 0o100000;
+
     pub const O_CLOEXEC: c_int = 0o2000000;
     pub const O_PATH: c_int = 0o10000000;
 
@@ -123,9 +137,8 @@ fn open_readable_parent(parent: OwnedFd) -> io::Result<OwnedFd> {
     }
 
     // The lookup target is the kernel-defined "." of an already validated
-    // directory fd, not an agent-controlled path component. Android/bionic can
-    // reject O_NOFOLLOW on this reopen even though the O_PATH parent is valid,
-    // so prove safety by fd identity instead of relying on that flag here.
+    // directory fd, not an agent-controlled path component. Prove safety by
+    // fd identity rather than relying on path lookup semantics here.
     let fd = unsafe {
         sys::openat(
             parent_file.as_raw_fd(),
