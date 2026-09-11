@@ -1,6 +1,6 @@
 # Registered process provider contract
 
-The registered process provider is an internal D5 delegated-system substrate. It does **not** expose arbitrary process execution, a shell, caller-selected argv, caller-selected environment, caller-selected cwd, or a public MCP tool.
+The registered process provider is a D5 delegated-system provider for **operator-registered fixed operations**. It does **not** expose a general process launcher, a shell, caller-selected executable paths, caller-selected argv, caller-selected environment, or caller-selected cwd. MCP exposure remains absent in PR #50.
 
 ## Registry schema
 
@@ -29,7 +29,7 @@ The registry, executable, cwd, and Rust process helper are server-owned control-
 
 ## Authority classes
 
-Registered process execution is never A0. Starting a process consumes execution authority even when the target is logically read-only.
+Registered process execution is never A0. Starting a registered operation consumes execution authority even when the target is logically read-only.
 
 ```text
 read-only registered command
@@ -74,6 +74,24 @@ bounded stdout/stderr + timeout/cancel fencing
 
 The Rust helper binds executable and cwd identity by file descriptor. Bun launches the helper as a detached process-group leader. Timeout, output overflow, and `AbortSignal` cancellation kill the entire process group.
 
+## Fixed HTTP projection
+
+PR #50 adds an agent-facing HTTP projection for commands that already exist in the operator registry. It does not create a generic execution endpoint.
+
+For a registry command named `example.inspect`, the projected capability and route are fixed:
+
+```text
+capability: process.command.example.inspect
+route:      POST /v1/process/example.inspect
+input:      no query parameters, no request body
+```
+
+The gateway derives the executable, fixed argv, cwd, timeout, output ceiling, authority class, and scope from the validated registry. None of those control-plane values are accepted from the caller.
+
+`system.capabilities` builds ephemeral process capability descriptors from the live validated registry. The static `CAPABILITY_REGISTRY` is not modified, so the operator registry remains the single source of truth. A process capability is runtime-available only while both the registry and the configured native Rust helper validate.
+
+The public capability projection contains the capability name, D5/A1-or-A3 requirement, exact scope, mutation/cancellation flags, and fixed route. It does not disclose the executable path, registry argv, or cwd.
+
 ## Security invariants
 
 The provider currently enforces these invariants:
@@ -90,11 +108,13 @@ The provider currently enforces these invariants:
 - insufficient authority fails before provider execution
 - missing command scope fails before provider execution
 - an A1 grant cannot execute an A3 mutating command
+- public fixed-operation routes reject query parameters and request bodies before execution
+- dynamic discovery does not disclose executable, argv, or cwd
 - timeout, cancellation, and output overflow kill the process group
-- public process capability and MCP exposure remain absent
+- MCP process tools remain absent
 
-## Public exposure gate
+## MCP gate
 
-This substrate is not itself permission to expose process execution to an agent. A later public provider must separately prove capability discovery, runtime availability, session binding, tool schema, exact registered-command selection, result projection, and physical Android behavior.
+PR #50 deliberately stops at fixed HTTP projection plus `system.capabilities` discovery. MCP exposure requires a separate review and proof gate. Until then, MCP `tools/list` and `tools/call` do not project registered process commands.
 
-No future public layer should accept raw executable paths, arbitrary argv, arbitrary environment variables, arbitrary cwd values, or shell source text.
+Any future MCP layer must consume the same live registry-derived descriptors and must not introduce a second authorization registry or any caller-controlled executable, argv, environment, cwd, or shell text.

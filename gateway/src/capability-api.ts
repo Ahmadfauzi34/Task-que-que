@@ -14,7 +14,12 @@ import {
   evaluateCapabilityGrant,
   getCapability,
   projectCapabilityCatalog,
+  type CapabilityRegistry,
 } from "./capabilities";
+import {
+  loadRegisteredProcessProvider,
+  registeredProcessCapabilities,
+} from "./process-api";
 
 function jsonResponse(value: unknown, status = 200): Response {
   return new Response(`${JSON.stringify(value)}\n`, {
@@ -69,7 +74,7 @@ export async function handleCapabilityRequest(
   }
 
   const availability = await loadCapabilityAvailability(dependencies);
-  const capabilities = projectCapabilityCatalog(CAPABILITY_REGISTRY, auth.grant).map((projection) => {
+  const staticCapabilities = projectCapabilityCatalog(CAPABILITY_REGISTRY, auth.grant).map((projection) => {
     const descriptor = getCapability(CAPABILITY_REGISTRY, projection.name);
     const available = descriptor ? isCapabilityAvailable(descriptor, availability) : false;
     return {
@@ -79,6 +84,23 @@ export async function handleCapabilityRequest(
       executable: projection.accessible && available,
     };
   });
+
+  const processProvider = await loadRegisteredProcessProvider(dependencies);
+  const processDescriptors = processProvider
+    ? registeredProcessCapabilities(processProvider)
+    : [];
+  const processRegistry = Object.freeze(Object.fromEntries(
+    processDescriptors.map((descriptor) => [descriptor.name, descriptor]),
+  )) as CapabilityRegistry;
+  const processCapabilities = projectCapabilityCatalog(processRegistry, auth.grant).map((projection) => ({
+    ...projection,
+    authorized: projection.accessible,
+    available: true,
+    executable: projection.accessible,
+  }));
+
+  const capabilities = [...staticCapabilities, ...processCapabilities]
+    .sort((left, right) => left.name.localeCompare(right.name));
 
   return jsonResponse({
     schema_version: 1,
@@ -101,6 +123,7 @@ export async function handleCapabilityRequest(
       filesystem_reachable: availability.filesystemReachable,
       filesystem_mutation_reachable: availability.filesystemMutationReachable,
       git_metadata_reachable: availability.gitMetadataReachable,
+      registered_process_reachable: processProvider !== null,
     },
     capabilities,
   });

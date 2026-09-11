@@ -5,6 +5,7 @@ import { handleCapabilitySessionRequest } from "./capability-session-api";
 import { handleFilesystemRequest } from "./filesystem-api";
 import { handleFilesystemMutationRequest } from "./filesystem-mutation-api";
 import { handleGitMetadataRequest } from "./git-api";
+import { handleRegisteredProcessRequest } from "./process-api";
 import { handleDeclaredWorkflowResultRequest } from "./workflow-results";
 import { handlePublicWorkflowRequest } from "./workflows";
 
@@ -20,6 +21,9 @@ export async function routeGatewayRequest(
 
   const enforced = await enforceCapabilityAccess(request, dependencies);
   if (enforced instanceof Response) return enforced;
+
+  const processResponse = await handleRegisteredProcessRequest(enforced, dependencies);
+  if (processResponse) return processResponse;
 
   const filesystemResponse = await handleFilesystemRequest(enforced, dependencies);
   if (filesystemResponse) return filesystemResponse;
