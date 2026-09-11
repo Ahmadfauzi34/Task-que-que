@@ -11,6 +11,8 @@ export interface GatewayConfig {
   gitBin?: string | null;
   processRegistryFile?: string | null;
   processExecBin?: string | null;
+  publicOrigin?: string | null;
+  oauthAuthorizationServer?: string | null;
   apiToken: string | null;
   allowUnauthenticated: boolean;
   upstreamTimeoutMs: number;
@@ -68,6 +70,62 @@ function parseLoopbackOrigin(raw: string, name: string): string {
   }
 
   return url.origin;
+}
+
+function parsePublicHttpsOrigin(
+  raw: string | undefined,
+  name: string,
+): string | null {
+  const value = raw?.trim();
+  if (!value) return null;
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${name} must be a valid absolute HTTPS origin`);
+  }
+
+  if (url.protocol !== "https:") {
+    throw new Error(`${name} must use HTTPS`);
+  }
+  if (url.username || url.password) {
+    throw new Error(`${name} must not contain credentials`);
+  }
+  if (url.pathname !== "/" || url.search || url.hash) {
+    throw new Error(`${name} must be an origin without path, query, or fragment`);
+  }
+
+  return url.origin;
+}
+
+function parseAuthorizationServerIssuer(
+  raw: string | undefined,
+): string | null {
+  const value = raw?.trim();
+  if (!value) return null;
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("GATEWAY_OAUTH_AUTHORIZATION_SERVER must be a valid absolute HTTPS URL");
+  }
+
+  if (url.protocol !== "https:") {
+    throw new Error("GATEWAY_OAUTH_AUTHORIZATION_SERVER must use HTTPS");
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error(
+      "GATEWAY_OAUTH_AUTHORIZATION_SERVER must not contain credentials, query, or fragment",
+    );
+  }
+
+  return url.href.endsWith("/") && url.pathname !== "/"
+    ? url.href.slice(0, -1)
+    : url.href === `${url.origin}/`
+      ? url.origin
+      : url.href;
 }
 
 function parseAbsoluteProviderPath(
@@ -223,6 +281,19 @@ export function loadGatewayConfig(
     );
   }
 
+  const publicOrigin = parsePublicHttpsOrigin(
+    env.GATEWAY_PUBLIC_ORIGIN,
+    "GATEWAY_PUBLIC_ORIGIN",
+  );
+  const oauthAuthorizationServer = parseAuthorizationServerIssuer(
+    env.GATEWAY_OAUTH_AUTHORIZATION_SERVER,
+  );
+  if (oauthAuthorizationServer && !publicOrigin) {
+    throw new Error(
+      "GATEWAY_PUBLIC_ORIGIN is required when GATEWAY_OAUTH_AUTHORIZATION_SERVER is configured",
+    );
+  }
+
   const filesystemRoot = parseFilesystemRoot(env.GATEWAY_FILESYSTEM_ROOT);
   const filesystemMutatorBin = parseFilesystemMutatorBin(
     env.GATEWAY_FILESYSTEM_MUTATOR_BIN,
@@ -260,6 +331,8 @@ export function loadGatewayConfig(
     gitBin,
     processRegistryFile,
     processExecBin,
+    publicOrigin,
+    oauthAuthorizationServer,
     apiToken,
     allowUnauthenticated,
     upstreamTimeoutMs,
