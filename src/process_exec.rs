@@ -198,7 +198,10 @@ pub fn open_executable_for_exec(path: &Path) -> Result<OwnedFd, ProcessExecError
     Ok(file.into())
 }
 
-fn c_arguments(binary: &Path, arguments: &[String]) -> Result<(Vec<CString>, Vec<*const i8>), ProcessExecError> {
+fn c_arguments(
+    binary: &Path,
+    arguments: &[String],
+) -> Result<(Vec<CString>, Vec<*const std::os::raw::c_char>), ProcessExecError> {
     if arguments.len() > MAX_ARGUMENTS {
         return Err(ProcessExecError::InvalidArgument);
     }
@@ -211,7 +214,8 @@ fn c_arguments(binary: &Path, arguments: &[String]) -> Result<(Vec<CString>, Vec
         }
         values.push(CString::new(argument.as_str()).map_err(|_| ProcessExecError::InvalidArgument)?);
     }
-    let mut pointers: Vec<*const i8> = values.iter().map(|value| value.as_ptr()).collect();
+    let mut pointers: Vec<*const std::os::raw::c_char> =
+        values.iter().map(|value| value.as_ptr()).collect();
     pointers.push(std::ptr::null());
     Ok((values, pointers))
 }
@@ -230,7 +234,7 @@ pub fn exec_fd_bound(
         CString::new("LC_ALL=C").expect("constant contains no NUL"),
         CString::new("PATH=/nonexistent").expect("constant contains no NUL"),
     ];
-    let mut environment_pointers: Vec<*const i8> =
+    let mut environment_pointers: Vec<*const std::os::raw::c_char> =
         environment.iter().map(|value| value.as_ptr()).collect();
     environment_pointers.push(std::ptr::null());
 
