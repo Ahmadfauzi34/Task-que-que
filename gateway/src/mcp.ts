@@ -451,6 +451,9 @@ function toolSchema(
         ? filesystemPathSchema()
         : null;
   }
+  if (descriptor.provider === "git-cli-metadata") {
+    return emptySchema();
+  }
 
   switch (descriptor.name) {
     case "system.health":
@@ -653,6 +656,17 @@ function invocationForTool(
       return gatewayRequest(source, descriptor.route, "POST", { path: args.path });
     }
     return null;
+  }
+
+  if (descriptor.provider === "git-cli-metadata") {
+    if (
+      descriptor.method !== "GET"
+      || !descriptor.route
+      || !exactKeys(args, [])
+    ) {
+      return null;
+    }
+    return gatewayRequest(source, descriptor.route, "GET");
   }
 
   switch (descriptor.name) {
@@ -888,7 +902,7 @@ export async function handleMcpRequest(
           tools: { listChanged: false },
         },
         instructions:
-          "Task-que-que advertises only capabilities that are both authorized by the bearer grant and backed by a live provider. Delegated filesystem tools are confined to a server-configured root, and mutation tools execute only through the Rust fd-relative mutator. Use system.capabilities to inspect registered capabilities, authorization blockers, and runtime availability.",
+          "Task-que-que advertises only capabilities that are both authorized by the bearer grant and backed by a live provider. Delegated filesystem tools are confined to a server-configured root, mutation tools execute only through the Rust fd-relative mutator, and Git metadata tools expose only a server-configured repository through fixed read-only metadata commands. Use system.capabilities to inspect registered capabilities, authorization blockers, and runtime availability.",
         ttlMs: MCP_LIST_TTL_MS,
         cacheScope: "private",
       },
