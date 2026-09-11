@@ -126,9 +126,11 @@ async function processToolResult(
 
   const raw = await response.text();
   let structured: unknown = null;
+  let parseFailed = false;
   try {
     structured = raw.length > 0 ? JSON.parse(raw) : null;
   } catch {
+    parseFailed = true;
     structured = {
       error: {
         code: "invalid_gateway_json",
@@ -145,7 +147,7 @@ async function processToolResult(
       resultType: "complete",
       content: [{ type: "text", text }],
       structuredContent: structured,
-      isError: !response.ok,
+      isError: parseFailed || !response.ok,
       _meta: {
         "com.taskqueque/gatewayStatus": response.status,
         "com.taskqueque/gatewayVersion":
