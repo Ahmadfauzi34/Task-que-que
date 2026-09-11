@@ -1,4 +1,3 @@
-import { GATEWAY_VERSION } from "./app";
 import type { GatewayConfig } from "./config";
 
 export const OAUTH_PROTECTED_RESOURCE_ROOT = "/.well-known/oauth-protected-resource";
@@ -23,7 +22,19 @@ export function oauthBearerChallenge(config: GatewayConfig): string {
     : "Bearer";
 }
 
-function metadataResponse(config: GatewayConfig): Response {
+function headers(
+  gatewayVersion: string,
+  cacheControl: string,
+  extra?: HeadersInit,
+): Headers {
+  const value = new Headers(extra);
+  value.set("content-type", "application/json; charset=utf-8");
+  value.set("cache-control", cacheControl);
+  value.set("x-gateway-version", gatewayVersion);
+  return value;
+}
+
+function metadataResponse(config: GatewayConfig, gatewayVersion: string): Response {
   return new Response(
     `${JSON.stringify({
       resource: `${config.publicOrigin}${MCP_RESOURCE_PATH}`,
@@ -33,11 +44,7 @@ function metadataResponse(config: GatewayConfig): Response {
     })}\n`,
     {
       status: 200,
-      headers: {
-        "content-type": "application/json; charset=utf-8",
-        "cache-control": "public, max-age=300",
-        "x-gateway-version": GATEWAY_VERSION,
-      },
+      headers: headers(gatewayVersion, "public, max-age=300"),
     },
   );
 }
@@ -45,6 +52,7 @@ function metadataResponse(config: GatewayConfig): Response {
 export function handleOAuthProtectedResourceMetadataRequest(
   request: Request,
   config: GatewayConfig,
+  gatewayVersion: string,
 ): Response | null {
   const path = new URL(request.url).pathname;
   if (
@@ -64,11 +72,7 @@ export function handleOAuthProtectedResourceMetadataRequest(
       })}\n`,
       {
         status: 404,
-        headers: {
-          "content-type": "application/json; charset=utf-8",
-          "cache-control": "no-store",
-          "x-gateway-version": GATEWAY_VERSION,
-        },
+        headers: headers(gatewayVersion, "no-store"),
       },
     );
   }
@@ -83,15 +87,10 @@ export function handleOAuthProtectedResourceMetadataRequest(
       })}\n`,
       {
         status: 405,
-        headers: {
-          "content-type": "application/json; charset=utf-8",
-          "cache-control": "no-store",
-          allow: "GET",
-          "x-gateway-version": GATEWAY_VERSION,
-        },
+        headers: headers(gatewayVersion, "no-store", { allow: "GET" }),
       },
     );
   }
 
-  return metadataResponse(config);
+  return metadataResponse(config, gatewayVersion);
 }
