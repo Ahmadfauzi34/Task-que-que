@@ -31,6 +31,7 @@ export type OAuthAuthorizationValidationResult =
       ok: false;
       error: OAuthAuthorizationValidationErrorCode;
       description: string;
+      redirectAllowed: boolean;
     };
 
 const SINGLE_VALUE_PARAMS = [
@@ -50,8 +51,9 @@ const SCOPE_TOKEN = /^[\x21\x23-\x5B\x5D-\x7E]+$/;
 function failure(
   error: OAuthAuthorizationValidationErrorCode,
   description: string,
+  redirectAllowed = false,
 ): OAuthAuthorizationValidationResult {
-  return { ok: false, error, description };
+  return { ok: false, error, description, redirectAllowed };
 }
 
 function exactSingleValue(
@@ -96,14 +98,6 @@ export function validateOAuthAuthorizationRequest(
     values.set(name, value);
   }
 
-  const responseType = values.get("response_type");
-  if (responseType !== "code") {
-    return failure(
-      "unsupported_response_type",
-      "response_type must be code",
-    );
-  }
-
   const clientId = values.get("client_id");
   if (clientId !== policy.clientId) {
     return failure("unauthorized_client", "client_id is not registered");
@@ -117,20 +111,40 @@ export function validateOAuthAuthorizationRequest(
     );
   }
 
+  // From this point onward, the client and redirect URI have both been
+  // authenticated against operator-owned policy. A future HTTP handler may
+  // return an OAuth error through that exact redirect URI; failures before
+  // this point must stay on the authorization server itself.
+  const redirectAllowed = true;
+
+  const responseType = values.get("response_type");
+  if (responseType !== "code") {
+    return failure(
+      "unsupported_response_type",
+      "response_type must be code",
+      redirectAllowed,
+    );
+  }
+
   const resource = values.get("resource");
   if (resource !== policy.resource) {
     return failure(
       "invalid_target",
       "resource does not exactly match the configured MCP resource",
+      redirectAllowed,
     );
   }
 
   const rawScope = values.get("scope");
   if (rawScope === null || rawScope.trim().length === 0) {
-    return failure("invalid_scope", "scope must be non-empty");
+    return failure("invalid_scope", "scope must be non-empty", redirectAllowed);
   }
   if (rawScope !== rawScope.trim() || rawScope.includes("  ")) {
-    return failure("invalid_scope", "scope must use single ASCII-space separators");
+    return failure(
+      "invalid_scope",
+      "scope must use single ASCII-space separators",
+      redirectAllowed,
+    );
   }
 
   const requestedScopes = rawScope.split(" ");
@@ -143,6 +157,7 @@ export function validateOAuthAuthorizationRequest(
     return failure(
       "invalid_scope",
       "requested scopes must be a unique subset of the registered client scopes",
+      redirectAllowed,
     );
   }
 
@@ -156,12 +171,17 @@ export function validateOAuthAuthorizationRequest(
     return failure(
       "invalid_code_challenge",
       "PKCE S256 with a 43-character base64url challenge is required",
+      redirectAllowed,
     );
   }
 
   const state = values.get("state");
   if (state !== null && state.length === 0) {
-    return failure("invalid_request", "state must not be empty when present");
+    return failure(
+      "invalid_request",
+      "state must not be empty when present",
+      redirectAllowed,
+    );
   }
 
   return {
