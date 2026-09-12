@@ -1,4 +1,4 @@
-import { handleRequest, type GatewayDependencies } from "./app";
+import type { GatewayDependencies } from "./app";
 import { enforceCapabilityAccess } from "./capability-access";
 import { handleCapabilityRequest } from "./capability-api";
 import { handleCapabilitySessionRequest } from "./capability-session-api";
@@ -6,6 +6,7 @@ import { handleFilesystemRequest } from "./filesystem-api";
 import { handleFilesystemMutationRequest } from "./filesystem-mutation-api";
 import { handleGitMetadataRequest } from "./git-api";
 import { handleRegisteredProcessRequest } from "./process-api";
+import { handlePublicSurfaceRequest } from "./public-surface";
 import { handleDeclaredWorkflowResultRequest } from "./workflow-results";
 import { handlePublicWorkflowRequest } from "./workflows";
 
@@ -41,5 +42,5 @@ export async function routeGatewayRequest(
   if (declaredResult) return declaredResult;
 
   const workflowResponse = await handlePublicWorkflowRequest(enforced, dependencies);
-  return workflowResponse ?? handleRequest(enforced, dependencies);
+  return workflowResponse ?? handlePublicSurfaceRequest(enforced, dependencies);
 }
