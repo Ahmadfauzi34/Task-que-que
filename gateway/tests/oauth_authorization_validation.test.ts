@@ -71,14 +71,38 @@ describe("OAuth authorization request validation", () => {
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error(`expected duplicate ${parameter} rejection`);
       expect(result.error).toBe("invalid_request");
+      expect(result.redirectAllowed).toBe(false);
     }
   });
 
-  test("rejects wrong client, redirect URI, and resource exactly", () => {
+  test("never redirects errors for an untrusted client or redirect URI", () => {
+    const wrongClient = validateOAuthAuthorizationRequest(
+      authorizeUrl({ client_id: "other-client" }),
+      POLICY,
+    );
+    expect(wrongClient.ok).toBe(false);
+    if (!wrongClient.ok) {
+      expect(wrongClient.error).toBe("unauthorized_client");
+      expect(wrongClient.redirectAllowed).toBe(false);
+    }
+
+    const wrongRedirect = validateOAuthAuthorizationRequest(
+      authorizeUrl({ redirect_uri: "https://claude.example/callback/" }),
+      POLICY,
+    );
+    expect(wrongRedirect.ok).toBe(false);
+    if (!wrongRedirect.ok) {
+      expect(wrongRedirect.error).toBe("invalid_redirect_uri");
+      expect(wrongRedirect.redirectAllowed).toBe(false);
+    }
+  });
+
+  test("permits redirecting later protocol errors only after client and redirect validation", () => {
     const cases = [
-      ["client_id", "other-client", "unauthorized_client"],
-      ["redirect_uri", "https://claude.example/callback/", "invalid_redirect_uri"],
+      ["response_type", "token", "unsupported_response_type"],
       ["resource", "https://mcp.example.com/mcp/", "invalid_target"],
+      ["scope", "process.command.admin", "invalid_scope"],
+      ["code_challenge_method", "plain", "invalid_code_challenge"],
     ] as const;
 
     for (const [key, value, expectedError] of cases) {
@@ -89,17 +113,11 @@ describe("OAuth authorization request validation", () => {
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error(`expected ${key} rejection`);
       expect(result.error).toBe(expectedError);
+      expect(result.redirectAllowed).toBe(true);
     }
   });
 
-  test("rejects unsupported response types and scope escalation", () => {
-    const implicit = validateOAuthAuthorizationRequest(
-      authorizeUrl({ response_type: "token" }),
-      POLICY,
-    );
-    expect(implicit.ok).toBe(false);
-    if (!implicit.ok) expect(implicit.error).toBe("unsupported_response_type");
-
+  test("rejects scope escalation and malformed scope sets", () => {
     for (const scope of [
       "capability.read process.command.admin",
       "capability.read capability.read",
@@ -108,7 +126,10 @@ describe("OAuth authorization request validation", () => {
     ]) {
       const result = validateOAuthAuthorizationRequest(authorizeUrl({ scope }), POLICY);
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.error).toBe("invalid_scope");
+      if (!result.ok) {
+        expect(result.error).toBe("invalid_scope");
+        expect(result.redirectAllowed).toBe(true);
+      }
     }
   });
 
@@ -118,7 +139,10 @@ describe("OAuth authorization request validation", () => {
       POLICY,
     );
     expect(plain.ok).toBe(false);
-    if (!plain.ok) expect(plain.error).toBe("invalid_code_challenge");
+    if (!plain.ok) {
+      expect(plain.error).toBe("invalid_code_challenge");
+      expect(plain.redirectAllowed).toBe(true);
+    }
 
     for (const challenge of [
       "short",
@@ -130,7 +154,10 @@ describe("OAuth authorization request validation", () => {
         POLICY,
       );
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.error).toBe("invalid_code_challenge");
+      if (!result.ok) {
+        expect(result.error).toBe("invalid_code_challenge");
+        expect(result.redirectAllowed).toBe(true);
+      }
     }
   });
 
@@ -146,6 +173,9 @@ describe("OAuth authorization request validation", () => {
       POLICY,
     );
     expect(emptyState.ok).toBe(false);
-    if (!emptyState.ok) expect(emptyState.error).toBe("invalid_request");
+    if (!emptyState.ok) {
+      expect(emptyState.error).toBe("invalid_request");
+      expect(emptyState.redirectAllowed).toBe(true);
+    }
   });
 });
