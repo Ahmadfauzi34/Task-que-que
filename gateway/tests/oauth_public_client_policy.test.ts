@@ -56,7 +56,7 @@ describe("pre-registered OAuth public client policy", () => {
     for (const scopes of [
       "capability.read capability.read",
       "capability.read  git.head",
-      "capability.read scope with spaces",
+      "capability.read /leading",
       "capability.read bad$scope",
     ]) {
       expect(() => loadOAuthPublicClientPolicy({
@@ -64,6 +64,17 @@ describe("pre-registered OAuth public client policy", () => {
         GATEWAY_OAUTH_CLIENT_SCOPES: scopes,
       }, ORIGIN)).toThrow();
     }
+  });
+
+  test("treats ASCII spaces as OAuth scope separators", () => {
+    expect(loadOAuthPublicClientPolicy({
+      ...COMPLETE,
+      GATEWAY_OAUTH_CLIENT_SCOPES: "capability.read git.head process.command.proof.read",
+    }, ORIGIN)?.scopes).toEqual([
+      "capability.read",
+      "git.head",
+      "process.command.proof.read",
+    ]);
   });
 
   test("requires the configured public origin before deriving a resource audience", () => {
