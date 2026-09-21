@@ -23,6 +23,7 @@ export type OAuthAuthorizationResponseBuildError =
   | "invalid_redirect_uri"
   | "ambiguous_redirect_uri"
   | "invalid_issuer"
+  | "invalid_state"
   | "invalid_code"
   | "invalid_error";
 
@@ -133,7 +134,7 @@ function prepareRedirect(
   ) {
     return {
       ok: false,
-      error: "invalid_redirect_uri",
+      error: "invalid_state",
     };
   }
 
