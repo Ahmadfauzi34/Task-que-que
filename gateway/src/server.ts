@@ -6,6 +6,7 @@ import {
   MCP_ENDPOINT,
   MCP_PROTOCOL_VERSION,
 } from "./mcp-oauth";
+import { PendingOAuthConsentStore } from "./oauth-pending-consent-store";
 import { TASK_REGISTRY } from "./registry";
 import { routeGatewayRequest } from "./router";
 
@@ -14,11 +15,14 @@ const admissionController = new TokenBucketAdmissionController(
   config.enqueueRatePerSecond,
   config.enqueueBurst,
 );
+const oauthPendingConsentStore = new PendingOAuthConsentStore();
+
 const dependencies = {
   config,
   registry: TASK_REGISTRY,
   admissionController,
   providerFetchImpl: fetch,
+  oauthPendingConsentStore,
 };
 
 const server = Bun.serve({
@@ -59,5 +63,6 @@ console.log(`filesystem: ${config.filesystemRoot ? "scoped read-only provider co
 console.log(`process: ${config.processRegistryFile && config.processExecBin ? "registered fixed operations configured" : "disabled"}`);
 console.log("capability api: /v1/capabilities");
 console.log("capability sessions: /v1/capability-sessions");
+console.log("oauth consent operator: /v1/oauth/pending-consents (root bearer only)");
 console.log("workflow api: /v1/workflows");
 console.log("status : ready");

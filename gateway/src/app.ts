@@ -1,5 +1,6 @@
 import type { AdmissionController } from "./admission";
 import type { GatewayConfig } from "./config";
+import type { PendingOAuthConsentStore } from "./oauth-pending-consent-store";
 import { getTaskPolicy, type TaskRegistry } from "./registry";
 
 export const GATEWAY_VERSION = "0.2.0";
@@ -15,6 +16,7 @@ export interface GatewayDependencies {
   registry: TaskRegistry;
   admissionController: AdmissionController;
   fetchImpl?: FetchLike;
+  oauthPendingConsentStore?: PendingOAuthConsentStore;
 }
 
 interface PublicTaskRequest {
