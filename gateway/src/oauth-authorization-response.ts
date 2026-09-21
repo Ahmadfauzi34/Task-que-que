@@ -6,6 +6,7 @@ const encoder = new TextEncoder();
 
 const MAX_URI_BYTES = 4_096;
 const MAX_ERROR_DESCRIPTION_BYTES = 512;
+const MAX_STATE_BYTES = 1_024;
 const AUTHORIZATION_CODE = /^[A-Za-z0-9_-]{32,128}$/;
 const OAUTH_ERROR = /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/;
 
@@ -123,6 +124,19 @@ function prepareRedirect(
     };
   }
 
+  if (
+    request.state !== null
+    && (
+      request.state.length === 0
+      || byteLength(request.state) > MAX_STATE_BYTES
+    )
+  ) {
+    return {
+      ok: false,
+      error: "invalid_redirect_uri",
+    };
+  }
+
   if (redirectHasReservedResponseParams(redirect)) {
     return {
       ok: false,
@@ -160,7 +174,12 @@ function appendResponseQuery(
   exactRedirectUri: string,
   params: URLSearchParams,
 ): string {
-  const separator = exactRedirectUri.includes("?") ? "&" : "?";
+  const separator =
+    exactRedirectUri.endsWith("?") || exactRedirectUri.endsWith("&")
+      ? ""
+      : exactRedirectUri.includes("?")
+        ? "&"
+        : "?";
   return `${exactRedirectUri}${separator}${params.toString()}`;
 }
 
