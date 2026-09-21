@@ -30,10 +30,18 @@ export type OAuthAuthorizationResponseBuildResult =
       ok: true;
       redirectUri: string;
     }
-  | {
-      ok: false;
-      error: OAuthAuthorizationResponseBuildError;
-    };
+  | OAuthAuthorizationResponseBuildFailure;
+
+interface OAuthAuthorizationResponseBuildFailure {
+  ok: false;
+  error: OAuthAuthorizationResponseBuildError;
+}
+
+interface PreparedOAuthRedirect {
+  ok: true;
+  redirect: URL;
+  issuer: string;
+}
 
 function byteLength(value: string): number {
   return encoder.encode(value).byteLength;
@@ -106,11 +114,7 @@ function normalizeIssuer(issuer: string): string | null {
 function prepareRedirect(
   request: ValidatedOAuthAuthorizationRequest,
   issuer: string,
-): OAuthAuthorizationResponseBuildResult | {
-  ok: true;
-  redirect: URL;
-  issuer: string;
-} {
+): OAuthAuthorizationResponseBuildFailure | PreparedOAuthRedirect {
   const redirect = parseRedirectUri(request);
   if (!redirect) {
     return {
