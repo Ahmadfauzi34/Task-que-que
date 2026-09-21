@@ -108,9 +108,6 @@ export async function handleOAuthConsentOperatorRequest(
 
   if (!collection && !decisionMatch) return null;
 
-  const queryError = assertNoQuery(url);
-  if (queryError) return queryError;
-
   if (!isRootAuthorization(request, config)) {
     return errorResponse(
       401,
@@ -118,6 +115,9 @@ export async function handleOAuthConsentOperatorRequest(
       "root bearer token required",
     );
   }
+
+  const queryError = assertNoQuery(url);
+  if (queryError) return queryError;
 
   if (!store) {
     return errorResponse(
