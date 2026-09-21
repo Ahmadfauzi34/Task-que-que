@@ -70,6 +70,30 @@ describe("OAuth authorization response builder", () => {
     ).toBe(true);
   });
 
+  test("preserves exact trailing redirect query separators without duplication", () => {
+    for (const exactRedirect of [
+      "https://client.example/callback?",
+      "https://client.example/callback?existing=1&",
+    ]) {
+      const result = buildOAuthAuthorizationSuccessRedirect(
+        request({ redirectUri: exactRedirect }),
+        ISSUER,
+        CODE,
+      );
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error("expected success redirect");
+
+      expect(
+        result.redirectUri.startsWith(
+          `${exactRedirect}code=${CODE}&`,
+        ),
+      ).toBe(true);
+      expect(result.redirectUri.includes("?&code=")).toBe(false);
+      expect(result.redirectUri.includes("&&code=")).toBe(false);
+    }
+  });
+
   test("omits state when the authorization request omitted state", () => {
     const result = buildOAuthAuthorizationSuccessRedirect(
       request({ state: null }),
@@ -166,6 +190,30 @@ describe("OAuth authorization response builder", () => {
         error: "invalid_issuer",
       });
     }
+  });
+
+  test("rejects unbounded reflected state", () => {
+    expect(
+      buildOAuthAuthorizationSuccessRedirect(
+        request({ state: "x".repeat(1_025) }),
+        ISSUER,
+        CODE,
+      ),
+    ).toEqual({
+      ok: false,
+      error: "invalid_state",
+    });
+
+    expect(
+      buildOAuthAuthorizationSuccessRedirect(
+        request({ state: "" }),
+        ISSUER,
+        CODE,
+      ),
+    ).toEqual({
+      ok: false,
+      error: "invalid_state",
+    });
   });
 
   test("rejects malformed authorization codes and error responses", () => {
