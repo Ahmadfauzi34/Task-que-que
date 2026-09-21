@@ -142,14 +142,22 @@ function prepareRedirect(
 }
 
 function appendCommonResponseParams(
-  redirect: URL,
+  params: URLSearchParams,
   request: ValidatedOAuthAuthorizationRequest,
   issuer: string,
 ): void {
   if (request.state !== null) {
-    redirect.searchParams.append("state", request.state);
+    params.append("state", request.state);
   }
-  redirect.searchParams.append("iss", issuer);
+  params.append("iss", issuer);
+}
+
+function appendResponseQuery(
+  exactRedirectUri: string,
+  params: URLSearchParams,
+): string {
+  const separator = exactRedirectUri.includes("?") ? "&" : "?";
+  return `${exactRedirectUri}${separator}${params.toString()}`;
 }
 
 export function buildOAuthAuthorizationSuccessRedirect(
@@ -167,16 +175,20 @@ export function buildOAuthAuthorizationSuccessRedirect(
   const prepared = prepareRedirect(request, issuer);
   if (!prepared.ok) return prepared;
 
-  prepared.redirect.searchParams.append("code", code);
+  const params = new URLSearchParams();
+  params.append("code", code);
   appendCommonResponseParams(
-    prepared.redirect,
+    params,
     request,
     prepared.issuer,
   );
 
   return {
     ok: true,
-    redirectUri: prepared.redirect.toString(),
+    redirectUri: appendResponseQuery(
+      request.redirectUri,
+      params,
+    ),
   };
 }
 
@@ -206,22 +218,26 @@ export function buildOAuthAuthorizationErrorRedirect(
   const prepared = prepareRedirect(request, issuer);
   if (!prepared.ok) return prepared;
 
-  prepared.redirect.searchParams.append("error", error);
+  const params = new URLSearchParams();
+  params.append("error", error);
   if (description !== null) {
-    prepared.redirect.searchParams.append(
+    params.append(
       "error_description",
       description,
     );
   }
 
   appendCommonResponseParams(
-    prepared.redirect,
+    params,
     request,
     prepared.issuer,
   );
 
   return {
     ok: true,
-    redirectUri: prepared.redirect.toString(),
+    redirectUri: appendResponseQuery(
+      request.redirectUri,
+      params,
+    ),
   };
 }
