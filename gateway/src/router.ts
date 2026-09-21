@@ -2,6 +2,7 @@ import type { GatewayDependencies } from "./app";
 import { enforceCapabilityAccess } from "./capability-access";
 import { handleCapabilityRequest } from "./capability-api";
 import { handleCapabilitySessionRequest } from "./capability-session-api";
+import { handleOAuthConsentOperatorRequest } from "./oauth-consent-operator-api";
 import { handleFilesystemRequest } from "./filesystem-api";
 import { handleFilesystemMutationRequest } from "./filesystem-mutation-api";
 import { handleGitMetadataRequest } from "./git-api";
@@ -16,6 +17,13 @@ export async function routeGatewayRequest(
 ): Promise<Response> {
   const sessionResponse = await handleCapabilitySessionRequest(request, dependencies);
   if (sessionResponse) return sessionResponse;
+
+  const consentOperatorResponse = await handleOAuthConsentOperatorRequest(
+    request,
+    dependencies.config,
+    dependencies.oauthPendingConsentStore,
+  );
+  if (consentOperatorResponse) return consentOperatorResponse;
 
   const capabilityResponse = await handleCapabilityRequest(request, dependencies);
   if (capabilityResponse) return capabilityResponse;
