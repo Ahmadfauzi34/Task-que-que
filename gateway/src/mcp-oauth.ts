@@ -24,9 +24,10 @@ export async function handleMcpRequestWithOAuthDiscovery(
   const selfHostedScopes =
     dependencies.config.oauthAuthorizationServer
       === dependencies.config.publicOrigin
-      ? dependencies.oauthPublicClientPolicy
-          ?.scopes
-        ?? []
+      && dependencies.oauthPublicClientPolicy
+        ?.scopes
+        .includes("capability.read")
+      ? ["capability.read"]
       : [];
 
   const challenge = oauthBearerChallenge(
