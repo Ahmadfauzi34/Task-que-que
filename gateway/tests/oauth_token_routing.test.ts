@@ -420,7 +420,7 @@ describe(
     );
 
     test(
-      "rejects public-client Authorization headers and unknown parameters before consuming the code",
+      "rejects public-client Authorization headers before consuming the code",
       async () => {
         const deps =
           dependencies();
@@ -442,34 +442,17 @@ describe(
           withAuth.status,
         ).toBe(401);
         expect(
+          withAuth.headers.get(
+            "www-authenticate",
+          ),
+        ).toBe(
+          'Basic realm="oauth-token"',
+        );
+        expect(
           await withAuth.json(),
         ).toMatchObject({
           error:
             "invalid_client",
-        });
-
-        const unknown =
-          tokenBody(code);
-
-        unknown.set(
-          "client_secret",
-          "not-accepted",
-        );
-
-        const withUnknown =
-          await tokenRequest(
-            deps,
-            unknown,
-          );
-
-        expect(
-          withUnknown.status,
-        ).toBe(400);
-        expect(
-          await withUnknown.json(),
-        ).toMatchObject({
-          error:
-            "invalid_request",
         });
 
         const valid =
@@ -479,6 +462,76 @@ describe(
           );
 
         expect(valid.status).toBe(200);
+      },
+    );
+
+    test(
+      "ignores extension token parameters without weakening exact binding",
+      async () => {
+        const deps =
+          dependencies();
+
+        const code =
+          await issueCode(deps);
+
+        const extended =
+          tokenBody(code);
+
+        extended.set(
+          "future_extension",
+          "opaque",
+        );
+
+        const response =
+          await tokenRequest(
+            deps,
+            extended,
+          );
+
+        expect(response.status).toBe(200);
+
+        const parsed =
+          await response.json();
+        const body =
+          parsed as Record<
+            string,
+            unknown
+          >;
+
+        expect(
+          String(body.access_token),
+        ).toStartWith("tqq1.");
+        expect(body.scope).toBe(
+          "capability.read",
+        );
+      },
+    );
+
+    test(
+      "returns invalid_client as HTTP 400 for a mismatched public client identifier",
+      async () => {
+        const deps =
+          dependencies();
+
+        const code =
+          await issueCode(deps);
+
+        const response =
+          await tokenRequest(
+            deps,
+            tokenBody(code, {
+              client_id:
+                "other-client",
+            }),
+          );
+
+        expect(response.status).toBe(400);
+        expect(
+          await response.json(),
+        ).toMatchObject({
+          error:
+            "invalid_client",
+        });
       },
     );
 
