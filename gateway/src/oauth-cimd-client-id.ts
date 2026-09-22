@@ -104,6 +104,7 @@ export function validateCimdClientId(
     value.length === 0
     || value !== value.trim()
     || value.includes("\\")
+    || !/^[\x21-\x7E]+$/.test(value)
   ) {
     return {
       ok: false,
