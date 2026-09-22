@@ -419,9 +419,10 @@ describe(
           capability.status,
         ).toBe(200);
 
+        const parsedProjection =
+          await capability.json();
         const projection =
-          await capability.json()
-          as {
+          parsedProjection as {
             subject: {
               kind: string;
             };
