@@ -32,6 +32,7 @@ export async function routeGatewayRequest(
     request,
     dependencies.config,
     dependencies.oauthPublicClientPolicy,
+    !!dependencies.oauthCimdDiscovery,
   );
   if (oauthMetadataResponse) return oauthMetadataResponse;
 
@@ -39,6 +40,7 @@ export async function routeGatewayRequest(
     request,
     dependencies.config,
     dependencies.oauthPublicClientPolicy,
+    dependencies.oauthCimdDiscovery,
     dependencies.oauthPendingConsentStore,
     dependencies.oauthAuthorizationCodeStore,
   );
@@ -48,6 +50,7 @@ export async function routeGatewayRequest(
     request,
     dependencies.config,
     dependencies.oauthPublicClientPolicy,
+    !!dependencies.oauthCimdDiscovery,
     dependencies.oauthAuthorizationCodeStore,
   );
   if (oauthTokenResponse) return oauthTokenResponse;
