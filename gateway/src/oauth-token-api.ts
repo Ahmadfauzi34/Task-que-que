@@ -310,11 +310,11 @@ export async function handleOAuthTokenRequest(
     OAuthPublicClientPolicy
     | null
     | undefined,
-  cimdEnabled: boolean,
   codeStore:
     OAuthAuthorizationCodeStore
     | null
     | undefined,
+  cimdEnabled = false,
 ): Promise<Response | null> {
   const url = new URL(request.url);
 
