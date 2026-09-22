@@ -2,6 +2,7 @@ import {
   GATEWAY_VERSION,
 } from "./app";
 import {
+  deriveOAuthResourceSessionSecret,
   issueCapabilitySession,
 } from "./capability-auth";
 import type {
@@ -357,9 +358,15 @@ export async function handleOAuthTokenRequest(
 
   let issued;
   try {
+    const signingSecret =
+      await deriveOAuthResourceSessionSecret(
+        config.apiToken,
+        consumed.value.binding.resource,
+      );
+
     issued =
       await issueCapabilitySession(
-        config.apiToken,
+        signingSecret,
         derived.grant,
         OAUTH_ACCESS_TOKEN_TTL_SECONDS,
       );
