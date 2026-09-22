@@ -21,6 +21,7 @@ const MIN_TTL_MS = 1_000;
 const MAX_TTL_MS = 5 * 60 * 1_000;
 
 const MAX_SCOPE_BYTES = 128;
+const MAX_STATE_BYTES = 1_024;
 const MAX_URI_BYTES = 4_096;
 
 const AUTHORIZATION_CODE =
@@ -146,6 +147,17 @@ function requestIsBounded(
       !== "S256"
     || !PKCE_S256_CHALLENGE.test(
       request.codeChallenge,
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    request.state !== null
+    && (
+      request.state.length === 0
+      || byteLength(request.state)
+        > MAX_STATE_BYTES
     )
   ) {
     return false;
