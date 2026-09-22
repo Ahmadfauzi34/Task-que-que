@@ -8,6 +8,7 @@ import {
 } from "./mcp-oauth";
 import { OAuthAuthorizationCodeStore } from "./oauth-authorization-code-store";
 import { loadOAuthPublicClientPolicy } from "./oauth-public-client-policy";
+import { deriveOAuthCapabilityGrant } from "./oauth-scope-grant";
 import { PendingOAuthConsentStore } from "./oauth-pending-consent-store";
 import { TASK_REGISTRY } from "./registry";
 import { routeGatewayRequest } from "./router";
@@ -23,6 +24,16 @@ const oauthPublicClientPolicy = loadOAuthPublicClientPolicy(
   process.env,
   config.publicOrigin,
 );
+if (oauthPublicClientPolicy) {
+  const mapped = deriveOAuthCapabilityGrant(
+    oauthPublicClientPolicy.scopes,
+  );
+  if (!mapped.ok) {
+    throw new Error(
+      `configured OAuth scope cannot map to capability authority: ${mapped.scope ?? mapped.error}`,
+    );
+  }
+}
 
 const dependencies = {
   config,
@@ -73,6 +84,7 @@ console.log(`process: ${config.processRegistryFile && config.processExecBin ? "r
 console.log("capability api: /v1/capabilities");
 console.log("capability sessions: /v1/capability-sessions");
 console.log(`oauth authorize: ${oauthPublicClientPolicy && config.oauthAuthorizationServer === config.publicOrigin ? "/oauth/authorize" : "disabled"}`);
+console.log(`oauth token: ${oauthPublicClientPolicy && config.oauthAuthorizationServer === config.publicOrigin ? "/oauth/token" : "disabled"}`);
 console.log("oauth consent operator: /v1/oauth/pending-consents (root bearer only)");
 console.log("workflow api: /v1/workflows");
 console.log("status : ready");
