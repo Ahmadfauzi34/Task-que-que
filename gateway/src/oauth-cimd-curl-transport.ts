@@ -3,6 +3,12 @@ import {
   spawn,
 } from "node:child_process";
 import {
+  accessSync,
+  constants as fsConstants,
+  lstatSync,
+  realpathSync,
+} from "node:fs";
+import {
   lookup,
 } from "node:dns/promises";
 import {
@@ -83,6 +89,40 @@ function boundedAbsoluteBinary(
   }
 
   return normalized;
+}
+
+export function validateConfiguredCimdCurlBinary(
+  value: string,
+): string {
+  const binary =
+    boundedAbsoluteBinary(value);
+
+  let stat;
+  try {
+    stat = lstatSync(binary);
+    accessSync(
+      binary,
+      fsConstants.X_OK,
+    );
+  } catch {
+    throw new Error(
+      "configured CIMD curl binary is unavailable or not executable",
+    );
+  }
+
+  if (
+    !stat.isFile()
+    || stat.isSymbolicLink()
+    || posix.normalize(
+      realpathSync(binary),
+    ) !== binary
+  ) {
+    throw new Error(
+      "configured CIMD curl binary must be a canonical non-symlink executable",
+    );
+  }
+
+  return binary;
 }
 
 function normalizedAddress(
@@ -668,12 +708,17 @@ export const resolveSystemCimdHostname:
 export function createCurlBackedCimdDiscoveryDependencies(
   binary: string,
 ): CimdDiscoveryDependencies {
+  const validatedBinary =
+    validateConfiguredCimdCurlBinary(
+      binary,
+    );
+
   return Object.freeze({
     resolve:
       resolveSystemCimdHostname,
     fetchPinned:
       createCurlCimdPinnedTransport(
-        binary,
+        validatedBinary,
       ),
   });
 }
