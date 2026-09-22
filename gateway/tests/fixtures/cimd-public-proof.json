@@ -1,0 +1,14 @@
+{
+  "client_id": "https://cdn.jsdelivr.net/gh/Ahmadfauzi34/Task-que-que@cimd-proof-client/gateway/tests/fixtures/cimd-public-proof.json",
+  "client_name": "Task-que-que CIMD Physical Proof Client",
+  "redirect_uris": [
+    "https://client.example.invalid/callback"
+  ],
+  "token_endpoint_auth_method": "none",
+  "grant_types": [
+    "authorization_code"
+  ],
+  "response_types": [
+    "code"
+  ]
+}
