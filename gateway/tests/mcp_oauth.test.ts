@@ -62,6 +62,7 @@ function dependencies(
               "https://mcp.example.com/mcp",
             scopes: [
               "capability.read",
+              "task.invoke",
             ],
           },
         }
