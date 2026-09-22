@@ -12,6 +12,12 @@ import {
 import {
   OAuthAuthorizationCodeStore,
 } from "./oauth-authorization-code-store";
+import type {
+  CimdDiscoveryDependencies,
+} from "./oauth-cimd-discovery";
+import {
+  resolveOAuthAuthorizationClientPolicy,
+} from "./oauth-cimd-policy";
 import {
   PendingOAuthConsentStore,
 } from "./oauth-pending-consent-store";
@@ -415,6 +421,10 @@ export async function handleOAuthAuthorizationRequest(
     OAuthPublicClientPolicy
     | null
     | undefined,
+  cimdDiscovery:
+    CimdDiscoveryDependencies
+    | null
+    | undefined,
   pendingStore:
     PendingOAuthConsentStore
     | null
@@ -443,7 +453,7 @@ export async function handleOAuthAuthorizationRequest(
 
   if (
     !issuer
-    || !policy
+    || (!policy && !cimdDiscovery)
     || !pendingStore
     || !codeStore
   ) {
@@ -470,11 +480,27 @@ export async function handleOAuthAuthorizationRequest(
     );
   }
 
+  const resolvedPolicy =
+    await resolveOAuthAuthorizationClientPolicy(
+      url,
+      issuer,
+      policy,
+      cimdDiscovery,
+    );
+
+  if (!resolvedPolicy.ok) {
+    return errorResponse(
+      resolvedPolicy.status,
+      resolvedPolicy.error,
+      resolvedPolicy.description,
+    );
+  }
+
   return startAuthorization(
     request,
     url,
     issuer,
-    policy,
+    resolvedPolicy.policy,
     pendingStore,
   );
 }
