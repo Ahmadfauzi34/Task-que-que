@@ -234,7 +234,7 @@ export function buildCimdCurlInvocation(
       "--proto",
       "=https",
       "--proto-redir",
-      "=-all",
+      "-all",
       "--max-redirs",
       "0",
       "--connect-timeout",
@@ -326,7 +326,8 @@ export async function runCimdCurlCommand(
 
     let settled = false;
     let terminated:
-      CimdCurlRunResult["error"]
+      "timeout"
+      | "output_too_large"
       | null = null;
 
     const stdout: Buffer[] = [];
