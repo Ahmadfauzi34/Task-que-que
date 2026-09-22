@@ -1,5 +1,7 @@
 import type { AdmissionController } from "./admission";
 import type { GatewayConfig } from "./config";
+import type { OAuthPublicClientPolicy } from "./oauth-authorization-validation";
+import type { OAuthAuthorizationCodeStore } from "./oauth-authorization-code-store";
 import type { PendingOAuthConsentStore } from "./oauth-pending-consent-store";
 import { getTaskPolicy, type TaskRegistry } from "./registry";
 
@@ -17,6 +19,8 @@ export interface GatewayDependencies {
   admissionController: AdmissionController;
   fetchImpl?: FetchLike;
   oauthPendingConsentStore?: PendingOAuthConsentStore;
+  oauthAuthorizationCodeStore?: OAuthAuthorizationCodeStore;
+  oauthPublicClientPolicy?: OAuthPublicClientPolicy | null;
 }
 
 interface PublicTaskRequest {
