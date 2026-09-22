@@ -51,6 +51,41 @@ describe("RFC 9728 protected resource metadata", () => {
     }
   });
 
+  test("advertises configured self-hosted OAuth scopes without inventing them", async () => {
+    const selfHosted = {
+      ...configured,
+      oauthAuthorizationServer:
+        "https://mcp.example.com",
+    };
+
+    const response =
+      handleOAuthProtectedResourceMetadataRequest(
+        new Request(
+          `http://gateway.internal${OAUTH_PROTECTED_RESOURCE_MCP}`,
+        ),
+        selfHosted,
+        "0.2.0",
+        [
+          "capability.read",
+          "task.invoke",
+        ],
+      );
+
+    expect(response).not.toBeNull();
+    expect(response!.status).toBe(200);
+    expect(await body(response!)).toMatchObject({
+      resource:
+        "https://mcp.example.com/mcp",
+      authorization_servers: [
+        "https://mcp.example.com",
+      ],
+      scopes_supported: [
+        "capability.read",
+        "task.invoke",
+      ],
+    });
+  });
+
   test("fails closed when OAuth discovery is not configured", async () => {
     const response = handleOAuthProtectedResourceMetadataRequest(
       new Request(`http://gateway.internal${OAUTH_PROTECTED_RESOURCE_ROOT}`),

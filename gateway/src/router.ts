@@ -3,7 +3,9 @@ import { enforceCapabilityAccess } from "./capability-access";
 import { handleCapabilityRequest } from "./capability-api";
 import { handleCapabilitySessionRequest } from "./capability-session-api";
 import { handleOAuthAuthorizationRequest } from "./oauth-authorization-api";
+import { handleOAuthAuthorizationServerMetadataRequest } from "./oauth-authorization-server-metadata";
 import { handleOAuthConsentOperatorRequest } from "./oauth-consent-operator-api";
+import { handleOAuthTokenRequest } from "./oauth-token-api";
 import { handleFilesystemRequest } from "./filesystem-api";
 import { handleFilesystemMutationRequest } from "./filesystem-mutation-api";
 import { handleGitMetadataRequest } from "./git-api";
@@ -26,6 +28,13 @@ export async function routeGatewayRequest(
   );
   if (consentOperatorResponse) return consentOperatorResponse;
 
+  const oauthMetadataResponse = handleOAuthAuthorizationServerMetadataRequest(
+    request,
+    dependencies.config,
+    dependencies.oauthPublicClientPolicy,
+  );
+  if (oauthMetadataResponse) return oauthMetadataResponse;
+
   const oauthAuthorizationResponse = await handleOAuthAuthorizationRequest(
     request,
     dependencies.config,
@@ -34,6 +43,14 @@ export async function routeGatewayRequest(
     dependencies.oauthAuthorizationCodeStore,
   );
   if (oauthAuthorizationResponse) return oauthAuthorizationResponse;
+
+  const oauthTokenResponse = await handleOAuthTokenRequest(
+    request,
+    dependencies.config,
+    dependencies.oauthPublicClientPolicy,
+    dependencies.oauthAuthorizationCodeStore,
+  );
+  if (oauthTokenResponse) return oauthTokenResponse;
 
   const capabilityResponse = await handleCapabilityRequest(request, dependencies);
   if (capabilityResponse) return capabilityResponse;

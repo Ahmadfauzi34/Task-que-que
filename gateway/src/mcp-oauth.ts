@@ -21,7 +21,19 @@ export async function handleMcpRequestWithOAuthDiscovery(
   );
   if (!response || response.status !== 401) return response;
 
-  const challenge = oauthBearerChallenge(dependencies.config);
+  const selfHostedScopes =
+    dependencies.config.oauthAuthorizationServer
+      === dependencies.config.publicOrigin
+      && dependencies.oauthPublicClientPolicy
+        ?.scopes
+        .includes("capability.read")
+      ? ["capability.read"]
+      : [];
+
+  const challenge = oauthBearerChallenge(
+    dependencies.config,
+    selfHostedScopes,
+  );
   if (challenge === "Bearer") return response;
 
   const headers = new Headers(response.headers);

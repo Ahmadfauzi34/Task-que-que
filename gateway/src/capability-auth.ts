@@ -12,6 +12,8 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const SESSION_TOKEN_PREFIX = "tqq1";
 const SIGNING_DOMAIN = "task-que-que-capability-session-v1";
+const OAUTH_RESOURCE_SIGNING_DOMAIN =
+  "task-que-que-oauth-resource-session-v1";
 export const MIN_CAPABILITY_SESSION_TTL_SECONDS = 60;
 export const MAX_CAPABILITY_SESSION_TTL_SECONDS = 24 * 60 * 60;
 export const MAX_CAPABILITY_SESSION_SCOPES = 64;
@@ -138,6 +140,51 @@ async function verifyPayload(
     signature,
     encoder.encode(`${SIGNING_DOMAIN}.${payload}`),
   );
+}
+
+export async function deriveOAuthResourceSessionSecret(
+  rootSecret: string,
+  resource: string,
+): Promise<string> {
+  if (!rootSecret) {
+    throw new Error(
+      "root signing secret is required",
+    );
+  }
+
+  let url: URL;
+  try {
+    url = new URL(resource);
+  } catch {
+    throw new Error(
+      "OAuth resource must be an absolute HTTPS URL",
+    );
+  }
+
+  if (
+    url.protocol !== "https:"
+    || url.username
+    || url.password
+    || url.search
+    || url.hash
+  ) {
+    throw new Error(
+      "OAuth resource must be an absolute HTTPS URL without credentials, query, or fragment",
+    );
+  }
+
+  const derived =
+    await crypto.subtle.sign(
+      "HMAC",
+      await hmacKey(rootSecret),
+      encoder.encode(
+        `${OAUTH_RESOURCE_SIGNING_DOMAIN}.${resource}`,
+      ),
+    );
+
+  return `oauth1.${base64UrlEncode(
+    new Uint8Array(derived),
+  )}`;
 }
 
 function exactKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
@@ -309,5 +356,33 @@ export async function resolveAuthorizationContext(
       expiresAt: null,
     });
   }
-  return verifyCapabilitySession(token, config.apiToken, nowMs);
+  const rootSession =
+    await verifyCapabilitySession(
+      token,
+      config.apiToken,
+      nowMs,
+    );
+
+  if (rootSession) {
+    return rootSession;
+  }
+
+  if (!config.publicOrigin) {
+    return null;
+  }
+
+  const oauthResource =
+    `${config.publicOrigin}/mcp`;
+
+  const oauthSecret =
+    await deriveOAuthResourceSessionSecret(
+      config.apiToken,
+      oauthResource,
+    );
+
+  return verifyCapabilitySession(
+    token,
+    oauthSecret,
+    nowMs,
+  );
 }
