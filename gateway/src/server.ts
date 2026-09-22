@@ -8,6 +8,9 @@ import {
 } from "./mcp-oauth";
 import { OAuthAuthorizationCodeStore } from "./oauth-authorization-code-store";
 import { loadOAuthPublicClientPolicy } from "./oauth-public-client-policy";
+import {
+  createCurlBackedCimdDiscoveryDependencies,
+} from "./oauth-cimd-curl-transport";
 import { deriveOAuthCapabilityGrant } from "./oauth-scope-grant";
 import { PendingOAuthConsentStore } from "./oauth-pending-consent-store";
 import { TASK_REGISTRY } from "./registry";
@@ -24,6 +27,31 @@ const oauthPublicClientPolicy = loadOAuthPublicClientPolicy(
   process.env,
   config.publicOrigin,
 );
+
+const configuredCimdCurlBin =
+  process.env.GATEWAY_CIMD_CURL_BIN
+    ?.trim()
+  || null;
+
+if (
+  configuredCimdCurlBin
+  && (
+    !config.publicOrigin
+    || config.oauthAuthorizationServer
+      !== config.publicOrigin
+  )
+) {
+  throw new Error(
+    "GATEWAY_CIMD_CURL_BIN requires a self-hosted OAuth authorization server",
+  );
+}
+
+const oauthCimdDiscovery =
+  configuredCimdCurlBin
+    ? createCurlBackedCimdDiscoveryDependencies(
+        configuredCimdCurlBin,
+      )
+    : null;
 if (oauthPublicClientPolicy) {
   const mapped = deriveOAuthCapabilityGrant(
     oauthPublicClientPolicy.scopes,
@@ -43,6 +71,7 @@ const dependencies = {
   oauthPendingConsentStore,
   oauthAuthorizationCodeStore,
   oauthPublicClientPolicy,
+  oauthCimdDiscovery,
 };
 
 const server = Bun.serve({
@@ -83,8 +112,18 @@ console.log(`filesystem: ${config.filesystemRoot ? "scoped read-only provider co
 console.log(`process: ${config.processRegistryFile && config.processExecBin ? "registered fixed operations configured" : "disabled"}`);
 console.log("capability api: /v1/capabilities");
 console.log("capability sessions: /v1/capability-sessions");
-console.log(`oauth authorize: ${oauthPublicClientPolicy && config.oauthAuthorizationServer === config.publicOrigin ? "/oauth/authorize" : "disabled"}`);
-console.log(`oauth token: ${oauthPublicClientPolicy && config.oauthAuthorizationServer === config.publicOrigin ? "/oauth/token" : "disabled"}`);
+const localOAuthConfigured =
+  config.oauthAuthorizationServer
+    === config.publicOrigin
+  && !!config.publicOrigin
+  && (
+    !!oauthPublicClientPolicy
+    || !!oauthCimdDiscovery
+  );
+
+console.log(`oauth authorize: ${localOAuthConfigured ? "/oauth/authorize" : "disabled"}`);
+console.log(`oauth token: ${localOAuthConfigured ? "/oauth/token" : "disabled"}`);
+console.log(`oauth CIMD: ${oauthCimdDiscovery ? "peer-pinned curl discovery enabled" : "disabled"}`);
 console.log("oauth consent operator: /v1/oauth/pending-consents (root bearer only)");
 console.log("workflow api: /v1/workflows");
 console.log("status : ready");
