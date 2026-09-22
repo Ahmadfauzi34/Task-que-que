@@ -30,34 +30,34 @@ const MAX_TOKEN_REQUEST_BYTES =
 const AUTHORIZATION_CODE =
   /^[A-Za-z0-9_-]{43}$/;
 
-const ALLOWED_TOKEN_PARAMS =
-  new Set([
-    "grant_type",
-    "code",
-    "client_id",
-    "redirect_uri",
-    "resource",
-    "code_verifier",
-  ]);
-
 const encoder = new TextEncoder();
 
 function oauthJson(
   value: unknown,
   status = 200,
+  extraHeaders?: HeadersInit,
 ): Response {
+  const headers =
+    new Headers(extraHeaders);
+  headers.set(
+    "content-type",
+    "application/json; charset=utf-8",
+  );
+  headers.set(
+    "cache-control",
+    "no-store",
+  );
+  headers.set("pragma", "no-cache");
+  headers.set(
+    "x-gateway-version",
+    GATEWAY_VERSION,
+  );
+
   return new Response(
     `${JSON.stringify(value)}\n`,
     {
       status,
-      headers: {
-        "content-type":
-          "application/json; charset=utf-8",
-        "cache-control": "no-store",
-        pragma: "no-cache",
-        "x-gateway-version":
-          GATEWAY_VERSION,
-      },
+      headers,
     },
   );
 }
@@ -66,6 +66,7 @@ function oauthError(
   error: string,
   description: string,
   status = 400,
+  extraHeaders?: HeadersInit,
 ): Response {
   return oauthJson(
     {
@@ -74,6 +75,7 @@ function oauthError(
         description,
     },
     status,
+    extraHeaders,
   );
 }
 
@@ -104,15 +106,27 @@ async function parseTokenForm(
     );
   }
 
-  if (
-    request.headers.has(
+  const authorization =
+    request.headers.get(
       "authorization",
-    )
-  ) {
+    );
+
+  if (authorization !== null) {
+    const scheme =
+      /^([A-Za-z][A-Za-z0-9+.-]*)\s/.exec(
+        authorization,
+      )?.[1];
+
     return oauthError(
       "invalid_client",
       "this public client uses token_endpoint_auth_method=none",
       401,
+      scheme
+        ? {
+            "www-authenticate":
+              `${scheme} realm="oauth-token"`,
+          }
+        : undefined,
     );
   }
 
@@ -181,26 +195,7 @@ async function parseTokenForm(
     );
   }
 
-  const params =
-    new URLSearchParams(raw);
-
-  for (
-    const key
-    of params.keys()
-  ) {
-    if (
-      !ALLOWED_TOKEN_PARAMS.has(
-        key,
-      )
-    ) {
-      return oauthError(
-        "invalid_request",
-        `unknown token parameter: ${key}`,
-      );
-    }
-  }
-
-  return params;
+  return new URLSearchParams(raw);
 }
 
 function exactCode(
@@ -345,10 +340,6 @@ export async function handleOAuthTokenRequest(
     return oauthError(
       validated.error,
       validated.description,
-      validated.error
-        === "invalid_client"
-        ? 401
-        : 400,
     );
   }
 
