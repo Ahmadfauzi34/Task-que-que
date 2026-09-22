@@ -374,6 +374,68 @@ describe(
     );
 
     test(
+      "binds the OAuth access token cryptographically to the configured MCP resource",
+      async () => {
+        const deps =
+          dependencies();
+
+        const code =
+          await issueCode(deps);
+
+        const token =
+          await tokenRequest(
+            deps,
+            tokenBody(code),
+          );
+
+        expect(token.status).toBe(200);
+
+        const parsed =
+          await token.json();
+        const accessToken =
+          String(
+            (
+              parsed as Record<
+                string,
+                unknown
+              >
+            ).access_token,
+          );
+
+        const otherResourceDeps: GatewayDependencies = {
+          ...dependencies(),
+          config: {
+            ...config(
+              "https://other.example.com",
+            ),
+            publicOrigin:
+              "https://other.example.com",
+            oauthAuthorizationServer:
+              "https://other.example.com",
+          },
+        };
+
+        const rejected =
+          await routeGatewayRequest(
+            new Request(
+              "http://127.0.0.1:3000/v1/capabilities",
+              {
+                headers: {
+                  authorization:
+                    `Bearer ${accessToken}`,
+                },
+              },
+            ),
+            otherResourceDeps,
+          );
+
+        expect(
+          rejected.status,
+        ).toBe(401);
+      },
+    );
+
+    test(
       "burns the code on a wrong PKCE verifier so a later retry cannot mint authority",
       async () => {
         const deps =
