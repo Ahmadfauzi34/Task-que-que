@@ -15,11 +15,22 @@ export function oauthProtectedResourceMetadataUrl(
   return `${config.publicOrigin}${OAUTH_PROTECTED_RESOURCE_MCP}`;
 }
 
-export function oauthBearerChallenge(config: GatewayConfig): string {
-  const metadataUrl = oauthProtectedResourceMetadataUrl(config);
-  return metadataUrl
-    ? `Bearer resource_metadata="${metadataUrl}"`
-    : "Bearer";
+export function oauthBearerChallenge(
+  config: GatewayConfig,
+  scopesSupported:
+    readonly string[] = [],
+): string {
+  const metadataUrl =
+    oauthProtectedResourceMetadataUrl(config);
+
+  if (!metadataUrl) return "Bearer";
+
+  const scope =
+    scopesSupported.length > 0
+      ? ` scope="${scopesSupported.join(" ")}"`
+      : "";
+
+  return `Bearer resource_metadata="${metadataUrl}"${scope}`;
 }
 
 function headers(
@@ -34,12 +45,24 @@ function headers(
   return value;
 }
 
-function metadataResponse(config: GatewayConfig, gatewayVersion: string): Response {
+function metadataResponse(
+  config: GatewayConfig,
+  gatewayVersion: string,
+  scopesSupported:
+    readonly string[],
+): Response {
   return new Response(
     `${JSON.stringify({
       resource: `${config.publicOrigin}${MCP_RESOURCE_PATH}`,
       authorization_servers: [config.oauthAuthorizationServer],
       bearer_methods_supported: ["header"],
+      ...(scopesSupported.length > 0
+        ? {
+            scopes_supported: [
+              ...scopesSupported,
+            ],
+          }
+        : {}),
       resource_name: "Task-que-que MCP",
     })}\n`,
     {
@@ -53,6 +76,8 @@ export function handleOAuthProtectedResourceMetadataRequest(
   request: Request,
   config: GatewayConfig,
   gatewayVersion: string,
+  scopesSupported:
+    readonly string[] = [],
 ): Response | null {
   const path = new URL(request.url).pathname;
   if (
@@ -92,5 +117,9 @@ export function handleOAuthProtectedResourceMetadataRequest(
     );
   }
 
-  return metadataResponse(config, gatewayVersion);
+  return metadataResponse(
+    config,
+    gatewayVersion,
+    scopesSupported,
+  );
 }
