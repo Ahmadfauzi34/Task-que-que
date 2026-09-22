@@ -163,7 +163,7 @@ async function start(
 
   expect(response.status).toBe(202);
 
-  return await response.json()
+  return (await response.json())
     as Record<string, unknown>;
 }
 
