@@ -421,10 +421,6 @@ export async function handleOAuthAuthorizationRequest(
     OAuthPublicClientPolicy
     | null
     | undefined,
-  cimdDiscovery:
-    CimdDiscoveryDependencies
-    | null
-    | undefined,
   pendingStore:
     PendingOAuthConsentStore
     | null
@@ -433,6 +429,9 @@ export async function handleOAuthAuthorizationRequest(
     OAuthAuthorizationCodeStore
     | null
     | undefined,
+  cimdDiscovery?:
+    CimdDiscoveryDependencies
+    | null,
 ): Promise<Response | null> {
   const url = new URL(request.url);
 
