@@ -35,11 +35,37 @@ function config(oauth: boolean): GatewayConfig {
   };
 }
 
-function dependencies(oauth: boolean): GatewayDependencies {
+function dependencies(
+  oauth: boolean,
+  selfHosted = false,
+): GatewayDependencies {
+  const configured =
+    config(oauth);
+
+  if (oauth && selfHosted) {
+    configured.oauthAuthorizationServer =
+      configured.publicOrigin;
+  }
+
   return {
-    config: config(oauth),
+    config: configured,
     registry: TASK_REGISTRY,
     admissionController,
+    ...(oauth && selfHosted
+      ? {
+          oauthPublicClientPolicy: {
+            clientId:
+              "claude-public-client",
+            redirectUri:
+              "https://claude.example/callback",
+            resource:
+              "https://mcp.example.com/mcp",
+            scopes: [
+              "capability.read",
+            ],
+          },
+        }
+      : {}),
     providerFetchImpl: async () => new Response(
       JSON.stringify({ schema_version: 1, active_task_names: [], worker_types: [] }),
       { status: 200, headers: { "content-type": "application/json" } },
@@ -74,8 +100,15 @@ function unauthenticatedDiscoverRequest(): Request {
   });
 }
 
-async function dispatch(oauth: boolean): Promise<Response> {
-  const deps = dependencies(oauth);
+async function dispatch(
+  oauth: boolean,
+  selfHosted = false,
+): Promise<Response> {
+  const deps =
+    dependencies(
+      oauth,
+      selfHosted,
+    );
   const response = await handleMcpRequestWithOAuthDiscovery(
     unauthenticatedDiscoverRequest(),
     deps,
@@ -91,6 +124,20 @@ describe("MCP OAuth resource discovery challenge", () => {
     expect(response.status).toBe(401);
     expect(response.headers.get("www-authenticate")).toBe(
       'Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"',
+    );
+  });
+
+  test("advertises self-hosted OAuth scopes in the bearer challenge", async () => {
+    const response =
+      await dispatch(true, true);
+
+    expect(response.status).toBe(401);
+    expect(
+      response.headers.get(
+        "www-authenticate",
+      ),
+    ).toBe(
+      'Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp" scope="capability.read"',
     );
   });
 
