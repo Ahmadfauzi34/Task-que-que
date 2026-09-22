@@ -279,12 +279,13 @@ describe(
 
         expect(token.status).toBe(200);
 
+        const parsedBody =
+          await token.json();
         const body =
-          await token.json()
-            as Record<
-              string,
-              unknown
-            >;
+          parsedBody as Record<
+            string,
+            unknown
+          >;
 
         expect(
           body.token_type,
@@ -326,18 +327,19 @@ describe(
           capabilities.status,
         ).toBe(200);
 
+        const parsedProjection =
+          await capabilities.json();
         const projection =
-          await capabilities.json()
-            as {
-              subject: {
-                kind: string;
-              };
-              grant: {
-                depth: number;
-                authority: number;
-                scopes: string[];
-              };
+          parsedProjection as {
+            subject: {
+              kind: string;
             };
+            grant: {
+              depth: number;
+              authority: number;
+              scopes: string[];
+            };
+          };
 
         expect(
           projection.subject.kind,
