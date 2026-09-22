@@ -6,6 +6,8 @@ import {
   MCP_ENDPOINT,
   MCP_PROTOCOL_VERSION,
 } from "./mcp-oauth";
+import { OAuthAuthorizationCodeStore } from "./oauth-authorization-code-store";
+import { loadOAuthPublicClientPolicy } from "./oauth-public-client-policy";
 import { PendingOAuthConsentStore } from "./oauth-pending-consent-store";
 import { TASK_REGISTRY } from "./registry";
 import { routeGatewayRequest } from "./router";
@@ -16,6 +18,11 @@ const admissionController = new TokenBucketAdmissionController(
   config.enqueueBurst,
 );
 const oauthPendingConsentStore = new PendingOAuthConsentStore();
+const oauthAuthorizationCodeStore = new OAuthAuthorizationCodeStore();
+const oauthPublicClientPolicy = loadOAuthPublicClientPolicy(
+  process.env,
+  config.publicOrigin,
+);
 
 const dependencies = {
   config,
@@ -23,6 +30,8 @@ const dependencies = {
   admissionController,
   providerFetchImpl: fetch,
   oauthPendingConsentStore,
+  oauthAuthorizationCodeStore,
+  oauthPublicClientPolicy,
 };
 
 const server = Bun.serve({
@@ -63,6 +72,7 @@ console.log(`filesystem: ${config.filesystemRoot ? "scoped read-only provider co
 console.log(`process: ${config.processRegistryFile && config.processExecBin ? "registered fixed operations configured" : "disabled"}`);
 console.log("capability api: /v1/capabilities");
 console.log("capability sessions: /v1/capability-sessions");
+console.log(`oauth authorize: ${oauthPublicClientPolicy && config.oauthAuthorizationServer === config.publicOrigin ? "/oauth/authorize" : "disabled"}`);
 console.log("oauth consent operator: /v1/oauth/pending-consents (root bearer only)");
 console.log("workflow api: /v1/workflows");
 console.log("status : ready");
