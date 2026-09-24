@@ -27,7 +27,9 @@ const MAX_URI_BYTES = 4_096;
 const AUTHORIZATION_CODE =
   /^[A-Za-z0-9_-]{43}$/;
 const CLIENT_ID =
-  /^[\x21-\x7E]{1,512}$/;
+  /^[\x21-\x7E]+$/;
+const MAX_CLIENT_ID_BYTES =
+  2_048;
 const SCOPE_TOKEN =
   /^[\x21\x23-\x5B\x5D-\x7E]+$/;
 const PKCE_S256_CHALLENGE =
@@ -133,6 +135,8 @@ function requestIsBounded(
   if (
     request.responseType !== "code"
     || !CLIENT_ID.test(request.clientId)
+    || byteLength(request.clientId)
+      > MAX_CLIENT_ID_BYTES
     || !isBoundedHttpsUri(
       request.redirectUri,
       { allowQuery: true },

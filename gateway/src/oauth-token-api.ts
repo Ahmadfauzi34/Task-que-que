@@ -18,6 +18,12 @@ import {
   deriveOAuthCapabilityGrant,
 } from "./oauth-scope-grant";
 import {
+  validateCimdClientId,
+} from "./oauth-cimd-client-id";
+import {
+  CIMD_DYNAMIC_SCOPES,
+} from "./oauth-cimd-policy";
+import {
   validateOAuthTokenRequest,
 } from "./oauth-token-validation";
 
@@ -217,7 +223,7 @@ function exactCode(
   return values[0]!;
 }
 
-function bindingMatchesPolicy(
+function bindingMatchesConfiguredAuthority(
   consumed: {
     binding: {
       clientId: string;
@@ -226,25 +232,74 @@ function bindingMatchesPolicy(
     };
     scopes: readonly string[];
   },
-  policy: OAuthPublicClientPolicy,
+  config: GatewayConfig,
+  policy:
+    OAuthPublicClientPolicy
+    | null
+    | undefined,
+  cimdEnabled: boolean,
 ): boolean {
+  if (policy) {
+    const staticIdentityMatches =
+      consumed.binding.clientId
+        === policy.clientId
+      && consumed.binding.redirectUri
+        === policy.redirectUri
+      && consumed.binding.resource
+        === policy.resource;
+
+    if (staticIdentityMatches) {
+      const permitted =
+        new Set(policy.scopes);
+
+      return consumed.scopes.every(
+        (scope) =>
+          permitted.has(scope),
+      );
+    }
+  }
+
   if (
-    consumed.binding.clientId
-      !== policy.clientId
-    || consumed.binding.redirectUri
-      !== policy.redirectUri
+    !cimdEnabled
+    || !config.publicOrigin
     || consumed.binding.resource
-      !== policy.resource
+      !== `${config.publicOrigin}/mcp`
+    || !validateCimdClientId(
+      consumed.binding.clientId,
+    ).ok
   ) {
     return false;
   }
 
-  const permitted =
-    new Set(policy.scopes);
+  let redirect: URL;
+  try {
+    redirect =
+      new URL(
+        consumed.binding.redirectUri,
+      );
+  } catch {
+    return false;
+  }
 
-  return consumed.scopes.every(
-    (scope) =>
-      permitted.has(scope),
+  if (
+    redirect.protocol !== "https:"
+    || redirect.username
+    || redirect.password
+    || redirect.hash
+  ) {
+    return false;
+  }
+
+  return (
+    consumed.scopes.length
+      === CIMD_DYNAMIC_SCOPES.length
+    && consumed.scopes.every(
+      (scope, index) =>
+        scope
+          === CIMD_DYNAMIC_SCOPES[
+            index
+          ],
+    )
   );
 }
 
@@ -259,6 +314,7 @@ export async function handleOAuthTokenRequest(
     OAuthAuthorizationCodeStore
     | null
     | undefined,
+  cimdEnabled = false,
 ): Promise<Response | null> {
   const url = new URL(request.url);
 
@@ -276,7 +332,7 @@ export async function handleOAuthTokenRequest(
 
   if (
     !selfHostedIssuer(config)
-    || !policy
+    || (!policy && !cimdEnabled)
     || !codeStore
     || !config.apiToken
   ) {
@@ -320,14 +376,16 @@ export async function handleOAuthTokenRequest(
   }
 
   if (
-    !bindingMatchesPolicy(
+    !bindingMatchesConfiguredAuthority(
       consumed.value,
+      config,
       policy,
+      cimdEnabled,
     )
   ) {
     return oauthError(
       "invalid_grant",
-      "authorization code is not bound to the configured public client",
+      "authorization code is not bound to an accepted OAuth client policy",
     );
   }
 
