@@ -267,8 +267,13 @@ export function buildCimdCurlInvocation(
     binary: curlBin,
     args: Object.freeze([
       "--disable",
+      "--globoff",
       "--silent",
       "--show-error",
+      "--proxy",
+      "",
+      "--noproxy",
+      "*",
       "--request",
       "GET",
       "--proto",
@@ -302,14 +307,33 @@ export function buildCimdCurlInvocation(
   });
 }
 
-function minimalCurlEnvironment():
+function nativeCurlEnvironment():
   NodeJS.ProcessEnv {
-  return {
-    LANG: "C",
-    LC_ALL: "C",
-    PATH: "/nonexistent",
-    HOME: "/nonexistent",
-  };
+  const environment:
+    NodeJS.ProcessEnv = {
+      ...process.env,
+      LANG: "C",
+      LC_ALL: "C",
+      http_proxy: "",
+      https_proxy: "",
+      HTTP_PROXY: "",
+      HTTPS_PROXY: "",
+      all_proxy: "",
+      ALL_PROXY: "",
+      no_proxy: "*",
+      NO_PROXY: "*",
+    };
+
+  // Avoid side-channel TLS logging and curl state/config
+  // destinations while preserving the native platform's
+  // runtime and CA environment (important on Termux).
+  delete environment.SSLKEYLOGFILE;
+  delete environment.QLOGDIR;
+  delete environment.NETRC;
+  delete environment.CURL_HOME;
+  delete environment.XDG_CONFIG_HOME;
+
+  return environment;
 }
 
 function killProcessGroup(
@@ -346,7 +370,7 @@ export async function runCimdCurlCommand(
         [...invocation.args],
         {
           env:
-            minimalCurlEnvironment(),
+            nativeCurlEnvironment(),
           shell: false,
           detached: true,
           stdio: [
@@ -374,13 +398,18 @@ export async function runCimdCurlCommand(
     const stderr: Buffer[] = [];
     let stdoutBytes = 0;
     let stderrBytes = 0;
+    let timer:
+      ReturnType<typeof setTimeout>
+      | null = null;
 
     const finish = (
       result: CimdCurlRunResult,
     ) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
       resolve(result);
     };
 
@@ -504,7 +533,7 @@ export async function runCimdCurlCommand(
       },
     );
 
-    const timer = setTimeout(
+    timer = setTimeout(
       () => terminate("timeout"),
       invocation.timeoutMs,
     );
@@ -650,8 +679,13 @@ export function createCurlCimdPinnedTransport(
       await run(invocation);
 
     if (!result.ok) {
+      const exit =
+        result.exitCode === undefined
+          ? ""
+          : ` (exit=${result.exitCode})`;
+
       throw new Error(
-        `CIMD curl transport failed: ${result.error}`,
+        `CIMD curl transport failed: ${result.error}${exit}`,
       );
     }
 
