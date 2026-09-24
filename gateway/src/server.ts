@@ -123,7 +123,7 @@ const localOAuthConfigured =
 
 console.log(`oauth authorize: ${localOAuthConfigured ? "/oauth/authorize" : "disabled"}`);
 console.log(`oauth token: ${localOAuthConfigured ? "/oauth/token" : "disabled"}`);
-console.log(`oauth CIMD: ${oauthCimdDiscovery ? "peer-pinned curl discovery enabled" : "disabled"}`);
+console.log(`oauth CIMD: ${oauthCimdDiscovery ? "portable single-peer curl discovery enabled" : "disabled"}`);
 console.log("oauth consent operator: /v1/oauth/pending-consents (root bearer only)");
 console.log("workflow api: /v1/workflows");
 console.log("status : ready");
