@@ -9,8 +9,8 @@ import {
 import { OAuthAuthorizationCodeStore } from "./oauth-authorization-code-store";
 import { loadOAuthPublicClientPolicy } from "./oauth-public-client-policy";
 import {
-  createCurlBackedCimdDiscoveryDependencies,
-} from "./oauth-cimd-curl-transport";
+  createPortableCurlBackedCimdDiscoveryDependencies,
+} from "./oauth-cimd-curl-runtime";
 import { deriveOAuthCapabilityGrant } from "./oauth-scope-grant";
 import { PendingOAuthConsentStore } from "./oauth-pending-consent-store";
 import { TASK_REGISTRY } from "./registry";
@@ -48,7 +48,7 @@ if (
 
 const oauthCimdDiscovery =
   configuredCimdCurlBin
-    ? createCurlBackedCimdDiscoveryDependencies(
+    ? createPortableCurlBackedCimdDiscoveryDependencies(
         configuredCimdCurlBin,
       )
     : null;
