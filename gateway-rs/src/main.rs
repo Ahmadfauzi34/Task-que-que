@@ -45,7 +45,7 @@ async fn main() {
         tokens: Mutex::new(HashMap::new()),
         presence: Mutex::new(HashMap::new()),
     });
-    STATE.set(state).expect("State already set");
+    let _ = STATE.set(state);
 
     let app = Router::new()
         .route("/health", get(handlers::health::handler))
