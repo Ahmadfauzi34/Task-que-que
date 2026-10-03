@@ -1,35 +1,21 @@
 //! Agent protocol handlers.
-//!
-//! - POST /v1/agent/register
-//! - POST /v1/agent/poll
-//! - POST /v1/agent/result
-//! - POST /v1/agent/heartbeat
 
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 use rand::Rng;
-use serde_json::json;
+use serde_json::{json, Value};
 
-use crate::{
-    db,
-    models::*,
-    AppState, PresenceInfo,
-};
+use crate::{db, models::*, AppState, PresenceInfo};
 
-/// Verifikasi token dari header X-Agent-Token.
-async fn verify_token(
-    headers: &HeaderMap,
-    agent_id: &str,
-    state: &AppState,
-) -> bool {
+async fn verify_token(headers: &HeaderMap, agent_id: &str, state: &AppState) -> bool {
     let token = headers
         .get("X-Agent-Token")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-
     let tokens = state.tokens.lock().await;
     match tokens.get(token) {
         Some(stored_id) => stored_id == agent_id,
@@ -37,30 +23,31 @@ async fn verify_token(
     }
 }
 
+fn json_response(status: StatusCode, value: Value) -> Response {
+    (status, Json(value)).into_response()
+}
+
 /// POST /v1/agent/register
 pub async fn register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> Response {
     if req.agent_id.is_empty() {
-        return (
+        return json_response(
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "agent_id required" })),
+            json!({ "error": "agent_id required" }),
         );
     }
 
-    // Generate token 64-char hex (32 bytes)
     let mut rng = rand::thread_rng();
     let bytes: [u8; 32] = rng.gen();
     let token = hex::encode(bytes);
 
-    // Simpan token -> agent_id
     {
         let mut tokens = state.tokens.lock().await;
         tokens.insert(token.clone(), req.agent_id.clone());
     }
 
-    // Update presence
     {
         let mut presence = state.presence.lock().await;
         presence.insert(
@@ -73,12 +60,9 @@ pub async fn register(
         );
     }
 
-    (
+    json_response(
         StatusCode::OK,
-        Json(json!({
-            "token": token,
-            "agent_id": req.agent_id,
-        })),
+        json!({ "token": token, "agent_id": req.agent_id }),
     )
 }
 
@@ -87,29 +71,27 @@ pub async fn poll(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<PollRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> Response {
     if req.agent_id.is_empty() {
-        return (
+        return json_response(
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "agent_id required" })),
+            json!({ "error": "agent_id required" }),
         );
     }
 
     if !verify_token(&headers, &req.agent_id, &state).await {
-        return (
+        return json_response(
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "invalid agent token" })),
+            json!({ "error": "invalid agent token" }),
         );
     }
 
     let db = state.db.lock().await;
 
-    // Auto-release expired
     if let Err(e) = db::auto_release_expired(&db) {
         tracing::warn!("auto-release failed: {}", e);
     }
 
-    // Claim satu task PENDING
     let now = chrono::Utc::now().timestamp() as f64;
     let lease_until = now + 60.0;
 
@@ -132,36 +114,32 @@ pub async fn poll(
 
     let (task_id, task_name, payload_json) = match task {
         Some(t) => t,
-        None => return (StatusCode::NO_CONTENT, Json(json!(null))),
+        None => return json_response(StatusCode::NO_CONTENT, Value::Null),
     };
 
-    // Filter: hanya untuk agent ini (cek payload)
-    let targets_this_agent = check_targets_agent(&task_name, &payload_json, &req.agent_id);
-
-    if !targets_this_agent {
-        // Kembalikan ke PENDING
+    let targets = check_targets_agent(&task_name, &payload_json, &req.agent_id);
+    if !targets {
         let _ = db.execute(
             "UPDATE tasks SET status = 'PENDING', locked_by = NULL, locked_until = NULL WHERE id = ?",
             [&task_id],
         );
-        return (StatusCode::NO_CONTENT, Json(json!(null)));
+        return json_response(StatusCode::NO_CONTENT, Value::Null);
     }
 
-    (
+    json_response(
         StatusCode::OK,
-        Json(json!({
+        json!({
             "task": {
                 "id": task_id,
                 "type": task_name,
                 "payload_json": payload_json,
             }
-        })),
+        }),
     )
 }
 
-/// Cek apakah task menargetkan agent ini (berdasarkan payload).
 fn check_targets_agent(task_name: &str, payload_json: &str, agent_id: &str) -> bool {
-    let payload: serde_json::Value = match serde_json::from_str(payload_json) {
+    let payload: Value = match serde_json::from_str(payload_json) {
         Ok(p) => p,
         Err(_) => return false,
     };
@@ -169,16 +147,14 @@ fn check_targets_agent(task_name: &str, payload_json: &str, agent_id: &str) -> b
     match task_name {
         "workflow.run" => {
             if let Some(steps) = payload.get("steps").and_then(|s| s.as_array()) {
-                steps.iter().any(|s| {
-                    s.get("agent").and_then(|a| a.as_str()) == Some(agent_id)
-                })
+                steps
+                    .iter()
+                    .any(|s| s.get("agent").and_then(|a| a.as_str()) == Some(agent_id))
             } else {
                 false
             }
         }
-        "agent.invoke" => {
-            payload.get("agent").and_then(|a| a.as_str()) == Some(agent_id)
-        }
+        "agent.invoke" => payload.get("agent").and_then(|a| a.as_str()) == Some(agent_id),
         _ => false,
     }
 }
@@ -188,11 +164,11 @@ pub async fn submit_result(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<ResultRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> Response {
     if !verify_token(&headers, &req.agent_id, &state).await {
-        return (
+        return json_response(
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "invalid agent token" })),
+            json!({ "error": "invalid agent token" }),
         );
     }
 
@@ -200,40 +176,32 @@ pub async fn submit_result(
     let now = chrono::Utc::now().timestamp() as f64;
     let result_str = req.result.to_string();
 
-    // Simpan hasil dan tandai COMPLETED
-    // (sesuai schema: result_bytes dan lease_generation wajib)
-    let tx_result: rusqlite::Result<()> = (|| {
-        // Ambil lease_generation saat ini
-        let lease_gen: i64 = db.query_row(
+    let lease_gen: i64 = db
+        .query_row(
             "SELECT COALESCE(lease_generation, 0) FROM tasks WHERE id = ?",
             [&req.task_id],
             |row| row.get(0),
-        ).unwrap_or(0);
+        )
+        .unwrap_or(0);
 
-        db.execute(
-            "INSERT INTO task_results (task_id, result_bytes, lease_generation, completed_at)
-             VALUES (?, ?, ?, ?)",
-            rusqlite::params![req.task_id, result_str.as_bytes(), lease_gen, now],
-        )?;
+    let r1 = db.execute(
+        "INSERT INTO task_results (task_id, result_bytes, lease_generation, completed_at)
+         VALUES (?, ?, ?, ?)",
+        rusqlite::params![req.task_id, result_str.as_bytes(), lease_gen, now],
+    );
 
-        db.execute(
-            "UPDATE tasks SET status = 'COMPLETED', locked_by = NULL, locked_until = NULL
-             WHERE id = ? AND locked_by = ?",
-            rusqlite::params![req.task_id, req.agent_id],
-        )?;
+    let r2 = db.execute(
+        "UPDATE tasks SET status = 'COMPLETED', locked_by = NULL, locked_until = NULL
+         WHERE id = ? AND locked_by = ?",
+        rusqlite::params![req.task_id, req.agent_id],
+    );
 
-        Ok(())
-    })();
-
-    match tx_result {
-        Ok(_) => (StatusCode::OK, Json(json!({ "ok": true }))),
-        Err(e) => {
-            tracing::warn!("submit_result failed: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "failed to save result" })),
-            )
-        }
+    match (r1, r2) {
+        (Ok(_), Ok(_)) => json_response(StatusCode::OK, json!({ "ok": true })),
+        _ => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({ "error": "failed to save result" }),
+        ),
     }
 }
 
@@ -242,13 +210,12 @@ pub async fn heartbeat(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<HeartbeatRequest>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    // Heartbeat boleh tanpa token (presence saja), tapi verifikasi jika ada
+) -> Response {
     let has_token = headers.get("X-Agent-Token").is_some();
     if has_token && !verify_token(&headers, &req.agent_id, &state).await {
-        return (
+        return json_response(
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "invalid agent token" })),
+            json!({ "error": "invalid agent token" }),
         );
     }
 
@@ -264,5 +231,5 @@ pub async fn heartbeat(
         );
     }
 
-    (StatusCode::OK, Json(json!({ "ok": true })))
+    json_response(StatusCode::OK, json!({ "ok": true }))
 }
