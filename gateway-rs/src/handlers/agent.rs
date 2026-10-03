@@ -1,7 +1,6 @@
 //! Agent protocol handlers.
 
 use axum::{
-    extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -9,14 +8,15 @@ use axum::{
 use rand::Rng;
 use serde_json::{json, Value};
 
-use crate::{db, models::*, AppState, PresenceInfo};
+use crate::{db, get_state, models::*, PresenceInfo};
 
-async fn verify_token(headers: &HeaderMap, agent_id: &str, state: &AppState) -> bool {
+fn verify_token(headers: &HeaderMap, agent_id: &str) -> bool {
     let token = headers
         .get("X-Agent-Token")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let tokens = state.tokens.lock().await;
+    let state = get_state();
+    let tokens = state.tokens.lock().unwrap();
     match tokens.get(token) {
         Some(stored_id) => stored_id == agent_id,
         None => false,
@@ -28,10 +28,7 @@ fn json_response(status: StatusCode, value: Value) -> Response {
 }
 
 /// POST /v1/agent/register
-pub async fn register(
-    State(state): State<AppState>,
-    Json(req): Json<RegisterRequest>,
-) -> Response {
+pub async fn register(Json(req): Json<RegisterRequest>) -> Response {
     if req.agent_id.is_empty() {
         return json_response(
             StatusCode::BAD_REQUEST,
@@ -43,13 +40,14 @@ pub async fn register(
     let bytes: [u8; 32] = rng.gen();
     let token = hex::encode(bytes);
 
+    let state = get_state();
     {
-        let mut tokens = state.tokens.lock().await;
+        let mut tokens = state.tokens.lock().unwrap();
         tokens.insert(token.clone(), req.agent_id.clone());
     }
 
     {
-        let mut presence = state.presence.lock().await;
+        let mut presence = state.presence.lock().unwrap();
         presence.insert(
             req.agent_id.clone(),
             PresenceInfo {
@@ -67,11 +65,7 @@ pub async fn register(
 }
 
 /// POST /v1/agent/poll
-pub async fn poll(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<PollRequest>,
-) -> Response {
+pub async fn poll(headers: HeaderMap, Json(req): Json<PollRequest>) -> Response {
     if req.agent_id.is_empty() {
         return json_response(
             StatusCode::BAD_REQUEST,
@@ -79,14 +73,15 @@ pub async fn poll(
         );
     }
 
-    if !verify_token(&headers, &req.agent_id, &state).await {
+    if !verify_token(&headers, &req.agent_id) {
         return json_response(
             StatusCode::UNAUTHORIZED,
             json!({ "error": "invalid agent token" }),
         );
     }
 
-    let db = state.db.lock().await;
+    let state = get_state();
+    let db = state.db.lock().unwrap();
 
     if let Err(e) = db::auto_release_expired(&db) {
         tracing::warn!("auto-release failed: {}", e);
@@ -160,19 +155,16 @@ fn check_targets_agent(task_name: &str, payload_json: &str, agent_id: &str) -> b
 }
 
 /// POST /v1/agent/result
-pub async fn submit_result(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<ResultRequest>,
-) -> Response {
-    if !verify_token(&headers, &req.agent_id, &state).await {
+pub async fn submit_result(headers: HeaderMap, Json(req): Json<ResultRequest>) -> Response {
+    if !verify_token(&headers, &req.agent_id) {
         return json_response(
             StatusCode::UNAUTHORIZED,
             json!({ "error": "invalid agent token" }),
         );
     }
 
-    let db = state.db.lock().await;
+    let state = get_state();
+    let db = state.db.lock().unwrap();
     let now = chrono::Utc::now().timestamp() as f64;
     let result_str = req.result.to_string();
 
@@ -206,21 +198,18 @@ pub async fn submit_result(
 }
 
 /// POST /v1/agent/heartbeat
-pub async fn heartbeat(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<HeartbeatRequest>,
-) -> Response {
+pub async fn heartbeat(headers: HeaderMap, Json(req): Json<HeartbeatRequest>) -> Response {
     let has_token = headers.get("X-Agent-Token").is_some();
-    if has_token && !verify_token(&headers, &req.agent_id, &state).await {
+    if has_token && !verify_token(&headers, &req.agent_id) {
         return json_response(
             StatusCode::UNAUTHORIZED,
             json!({ "error": "invalid agent token" }),
         );
     }
 
+    let state = get_state();
     {
-        let mut presence = state.presence.lock().await;
+        let mut presence = state.presence.lock().unwrap();
         presence.insert(
             req.agent_id.clone(),
             PresenceInfo {
