@@ -1,3 +1,26 @@
-/target
-/gateway/.check-dist
-/gateway/node_modules
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Bun / Node
+node_modules/
+bun.lockb
+
+# Build
+dist/
+build/
+*.o
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
