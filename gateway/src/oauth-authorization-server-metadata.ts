@@ -27,6 +27,7 @@ export function handleOAuthAuthorizationServerMetadataRequest(
     OAuthPublicClientPolicy
     | null
     | undefined,
+  cimdSupported = false,
 ): Response | null {
   const url = new URL(request.url);
 
@@ -59,7 +60,10 @@ export function handleOAuthAuthorizationServerMetadataRequest(
   const issuer =
     selfHostedIssuer(config);
 
-  if (!issuer || !policy) {
+  if (
+    !issuer
+    || (!policy && !cimdSupported)
+  ) {
     return new Response(
       `${JSON.stringify({
         error:
@@ -75,6 +79,17 @@ export function handleOAuthAuthorizationServerMetadataRequest(
             GATEWAY_VERSION,
         },
       },
+    );
+  }
+
+  const scopes =
+    new Set<string>(
+      policy?.scopes ?? [],
+    );
+
+  if (cimdSupported) {
+    scopes.add(
+      "capability.read",
     );
   }
 
@@ -98,8 +113,14 @@ export function handleOAuthAuthorizationServerMetadataRequest(
         "S256",
       ],
       scopes_supported: [
-        ...policy.scopes,
+        ...scopes,
       ],
+      ...(cimdSupported
+        ? {
+            client_id_metadata_document_supported:
+              true,
+          }
+        : {}),
     })}\n`,
     {
       status: 200,

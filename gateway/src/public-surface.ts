@@ -12,9 +12,20 @@ export async function handlePublicSurfaceRequest(
   const selfHostedScopes =
     dependencies.config.oauthAuthorizationServer
       === dependencies.config.publicOrigin
-      ? dependencies.oauthPublicClientPolicy
-          ?.scopes
-        ?? []
+      ? [
+          ...new Set([
+            ...(
+              dependencies.oauthPublicClientPolicy
+                ?.scopes
+              ?? []
+            ),
+            ...(
+              dependencies.oauthCimdDiscovery
+                ? ["capability.read"]
+                : []
+            ),
+          ]),
+        ]
       : [];
 
   const oauthMetadata =

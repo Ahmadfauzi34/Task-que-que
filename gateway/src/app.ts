@@ -1,5 +1,6 @@
 import type { AdmissionController } from "./admission";
 import type { GatewayConfig } from "./config";
+import type { CimdDiscoveryDependencies } from "./oauth-cimd-discovery";
 import type { OAuthPublicClientPolicy } from "./oauth-authorization-validation";
 import type { OAuthAuthorizationCodeStore } from "./oauth-authorization-code-store";
 import type { PendingOAuthConsentStore } from "./oauth-pending-consent-store";
@@ -21,6 +22,7 @@ export interface GatewayDependencies {
   oauthPendingConsentStore?: PendingOAuthConsentStore;
   oauthAuthorizationCodeStore?: OAuthAuthorizationCodeStore;
   oauthPublicClientPolicy?: OAuthPublicClientPolicy | null;
+  oauthCimdDiscovery?: CimdDiscoveryDependencies | null;
 }
 
 interface PublicTaskRequest {

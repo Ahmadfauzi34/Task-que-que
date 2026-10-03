@@ -50,7 +50,7 @@ describe(
   "CIMD pinned curl transport",
   () => {
     test(
-      "builds a no-shell HTTPS-only invocation pinned to the validated address set",
+      "builds a no-shell HTTPS-only direct invocation pinned to the validated address set",
       () => {
         const invocation =
           buildCimdCurlInvocation(
@@ -68,9 +68,35 @@ describe(
 
         expect(
           invocation.args,
+        ).toContain(
+          "--globoff",
+        );
+
+        expect(
+          invocation.args,
         ).not.toContain(
           "--location",
         );
+
+        const proxyIndex =
+          invocation.args.indexOf(
+            "--proxy",
+          );
+        expect(
+          invocation.args[
+            proxyIndex + 1
+          ],
+        ).toBe("");
+
+        const noProxyIndex =
+          invocation.args.indexOf(
+            "--noproxy",
+          );
+        expect(
+          invocation.args[
+            noProxyIndex + 1
+          ],
+        ).toBe("*");
 
         const protoIndex =
           invocation.args.indexOf(
@@ -267,7 +293,7 @@ describe(
     );
 
     test(
-      "fails closed when the native curl process fails",
+      "includes the native curl exit code on process failure without exposing response authority",
       async () => {
         const transport =
           createCurlCimdPinnedTransport(
@@ -283,7 +309,7 @@ describe(
         expect(
           transport(REQUEST),
         ).rejects.toThrow(
-          "process_failed",
+          "process_failed (exit=60)",
         );
       },
     );
@@ -340,6 +366,69 @@ describe(
         ).toThrow(
           "outside the transport contract",
         );
+      },
+    );
+
+    test(
+      "native command runner preserves TLS/runtime environment but strips proxy routing",
+      async () => {
+        const previousCert =
+          process.env.SSL_CERT_FILE;
+        const previousProxy =
+          process.env.HTTPS_PROXY;
+
+        process.env.SSL_CERT_FILE =
+          "/tmp/tqq-cimd-ca.pem";
+        process.env.HTTPS_PROXY =
+          "http://127.0.0.1:9999";
+
+        try {
+          const result =
+            await runCimdCurlCommand({
+              binary: "/bin/sh",
+              args: [
+                "-c",
+                'printf "%s|%s" "$SSL_CERT_FILE" "$HTTPS_PROXY"',
+              ],
+              timeoutMs: 1_000,
+              maxStdoutBytes: 1_024,
+              maxStderrBytes: 1_024,
+            });
+
+          expect(result.ok).toBe(true);
+
+          if (!result.ok) {
+            throw new Error(
+              "environment probe failed",
+            );
+          }
+
+          expect(
+            new TextDecoder().decode(
+              result.stdout,
+            ),
+          ).toBe(
+            "/tmp/tqq-cimd-ca.pem|",
+          );
+        } finally {
+          if (
+            previousCert === undefined
+          ) {
+            delete process.env.SSL_CERT_FILE;
+          } else {
+            process.env.SSL_CERT_FILE =
+              previousCert;
+          }
+
+          if (
+            previousProxy === undefined
+          ) {
+            delete process.env.HTTPS_PROXY;
+          } else {
+            process.env.HTTPS_PROXY =
+              previousProxy;
+          }
+        }
       },
     );
 
