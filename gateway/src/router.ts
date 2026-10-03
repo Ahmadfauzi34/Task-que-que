@@ -13,6 +13,8 @@ import { handleRegisteredProcessRequest } from "./process-api";
 import { handlePublicSurfaceRequest } from "./public-surface";
 import { handleDeclaredWorkflowResultRequest } from "./workflow-results";
 import { handlePublicWorkflowRequest } from "./workflows";
+import { handleAgentProxyRequest } from "./agent-proxy";
+import { handleAgentDirectRequest } from "./agent-direct";
 
 export async function routeGatewayRequest(
   request: Request,
@@ -78,6 +80,12 @@ export async function routeGatewayRequest(
 
   const declaredResult = await handleDeclaredWorkflowResultRequest(enforced, dependencies);
   if (declaredResult) return declaredResult;
+
+  const agentDirect = await handleAgentDirectRequest(enforced);
+  if (agentDirect) return agentDirect;
+
+  const agentProxy = await handleAgentProxyRequest(request, dependencies.config.workerBrokerOrigin ?? "http://127.0.0.1:7332");
+  if (agentProxy) return agentProxy;
 
   const workflowResponse = await handlePublicWorkflowRequest(enforced, dependencies);
   return workflowResponse ?? handlePublicSurfaceRequest(enforced, dependencies);
