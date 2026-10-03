@@ -1,0 +1,23 @@
+[package]
+name = "tqq-gateway-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Task-que-que gateway in Rust - minimal, stable, low memory"
+
+[[bin]]
+name = "tqq-gateway"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+rand = "0.8"
+hex = "0.4"
+chrono = "0.4"
