@@ -142,8 +142,8 @@ async function executeTask(task: any): Promise<unknown> {
     const results: unknown[] = [];
     for (let i = 0; i < steps.length; i++) {
       const s = steps[i];
-      // Hanya eksekusi step untuk agen ini; step agen lain di-skip
-      if (s.agent !== AGENT_ID && s.agent !== "sandbox-agent") {
+      // Hanya eksekusi step untuk agen ini (sesuai kontrak)
+      if (s.agent !== AGENT_ID) {
         results.push({ step: i, skipped: true, reason: "not for this agent" });
         continue;
       }
@@ -154,7 +154,8 @@ async function executeTask(task: any): Promise<unknown> {
   }
 
   if (task.type === "agent.invoke") {
-    if (payload?.agent !== AGENT_ID && payload?.agent !== "sandbox-agent") {
+    // Verifikasi: hanya untuk agen ini (sesuai kontrak, reject jika bukan)
+    if (payload?.agent !== AGENT_ID) {
       throw new Error("task not for this agent");
     }
     const mcpResult = await mcpCall(payload.tool, payload.arguments ?? {});
