@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tqq-connector"
+version = "0.1.0"
+description = "Python client for Task-que-que polling agents"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Ahmadfauzi34" }]
+keywords = ["task-queue", "mcp", "agent"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
+
+[project.urls]
+Homepage = "https://github.com/Ahmadfauzi34/Task-que-que"
+Repository = "https://github.com/Ahmadfauzi34/Task-que-que"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tqq_connector*"]
