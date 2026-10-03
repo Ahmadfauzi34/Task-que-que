@@ -51,6 +51,19 @@ jobs:
             --bin robust-sinkhorn-fs-mutator \
             --bin robust-sinkhorn-process-exec
 
+      - name: Build tqq-gateway for Android ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK_BIN/aarch64-linux-android21-clang"
+          export CC_aarch64_linux_android="$NDK_BIN/aarch64-linux-android21-clang"
+          export AR_aarch64_linux_android="$NDK_BIN/llvm-ar"
+
+          cd gateway-rs
+          cargo build --release --target aarch64-linux-android --bin tqq-gateway
+
       - name: Validate produced ELFs
         shell: bash
         run: |
@@ -59,7 +72,8 @@ jobs:
             target/aarch64-linux-android/release/robust-sinkhorn-queue \
             target/aarch64-linux-android/release/robust-sinkhorn-worker \
             target/aarch64-linux-android/release/robust-sinkhorn-fs-mutator \
-            target/aarch64-linux-android/release/robust-sinkhorn-process-exec
+            target/aarch64-linux-android/release/robust-sinkhorn-process-exec \
+            gateway-rs/target/aarch64-linux-android/release/tqq-gateway
           do
             test -f "$BIN"
             file "$BIN"
@@ -85,6 +99,8 @@ jobs:
             dist/robust-sinkhorn-fs-mutator-aarch64-linux-android
           cp target/aarch64-linux-android/release/robust-sinkhorn-process-exec \
             dist/robust-sinkhorn-process-exec-aarch64-linux-android
+          cp gateway-rs/target/aarch64-linux-android/release/tqq-gateway \
+            dist/tqq-gateway-aarch64-linux-android
           (
             cd dist
             sha256sum robust-sinkhorn-queue-aarch64-linux-android \
@@ -95,6 +111,8 @@ jobs:
               > robust-sinkhorn-fs-mutator-aarch64-linux-android.sha256
             sha256sum robust-sinkhorn-process-exec-aarch64-linux-android \
               > robust-sinkhorn-process-exec-aarch64-linux-android.sha256
+            sha256sum tqq-gateway-aarch64-linux-android \
+              > tqq-gateway-aarch64-linux-android.sha256
           )
 
       - name: Upload workflow artifact
@@ -110,6 +128,8 @@ jobs:
             dist/robust-sinkhorn-fs-mutator-aarch64-linux-android.sha256
             dist/robust-sinkhorn-process-exec-aarch64-linux-android
             dist/robust-sinkhorn-process-exec-aarch64-linux-android.sha256
+            dist/tqq-gateway-aarch64-linux-android
+            dist/tqq-gateway-aarch64-linux-android.sha256
           if-no-files-found: error
           retention-days: 30
 
